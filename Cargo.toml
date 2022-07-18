@@ -1,0 +1,36 @@
+[package]
+name = "gitalite"
+description = "A simple git-wiki"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-session = "3.0"
+async-sqlx-session = { version = "0.4", features = ["pg"] }
+axum = { version = "0.5", features = ["headers"] }
+axum-extra = { version = "0.3", features = ["cookie"] }
+clap = { version = "3.1", features = ["derive"] }
+color-eyre = "0.6"
+extract-frontmatter = "4.1"
+eyre = "0.6"
+git2 = "0.14"
+indieweb = "0.1"
+katex = "0.4"
+log = "0.4"
+mime_guess = "2.0"
+oauth2 = "4.1"
+pandoc = "0.8"
+pandoc_ast = "0.8"
+pretty_env_logger = "0.4"
+ron = "0.7"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_qs = "0.9"
+tera = "1.0"
+thiserror = "1.0"
+time = { version = "0.3", features = ["serde-human-readable"] }
+tokio = { version = "1.0", features = ["full"] }
+toml = "0.5"
+urlencoding = "2.1"

@@ -1,0 +1,28 @@
+body {
+  grid-template-areas:
+    "sidebar header"
+    "sidebar content"
+    "footer footer";
+  display: grid;
+  grid-template-columns: min-content 1fr;
+  grid-template-rows: min-content 1fr;
+
+  column-gap: 1em;
+  padding: 1em;
+}
+
+#header {
+  grid-area: header;
+}
+
+#sidebar {
+  grid-area: sidebar;
+}
+
+#content {
+  grid-area: content;
+}
+
+#footer {
+  grid-area: footer;
+}

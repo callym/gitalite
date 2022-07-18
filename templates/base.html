@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    {% block head %}
+    <link rel="stylesheet" href="/bundle.css" />
+    <script type="module" src="/bundle.js"></script>
+    <title>{% block title %}{% endblock title %} - My Webpage</title>
+    {% endblock head %} {% block script %} {% endblock script %}
+  </head>
+
+  <body>
+    <div id="sidebar">
+      <a href="/"><img src="/logo.png" /></a>
+
+      <fieldset>
+        <legend>Site</legend>
+        <ul>
+          <li>Front page</li>
+          <li>All pages</li>
+          <li>Categories</li>
+          <li>Random page</li>
+          <li>Recent activity</li>
+        </ul>
+      </fieldset>
+
+      <fieldset>
+        <legend>Settings</legend>
+        <label>
+          <span>Theme:</span>
+          <select id="color-scheme">
+            <option value="light">Light</option>
+            <option value="system">System</option>
+            <option value="dark">Dark</option>
+          </select>
+        </label>
+      </fieldset>
+    </div>
+    <div id="header">
+      <div id="account">
+        {% if user %}
+          {{ user.email }}
+          (<a href="/meta/logout">log out</a>)
+        {% else %}
+          <a href="/meta/login">log in</a>
+        {% endif %}
+      </div>
+      <div id="tabs">{% block tabs %}{% endblock tabs %}</div>
+    </div>
+    <div id="content">{% block content %}{% endblock content %}</div>
+    <div id="footer">
+      &copy; Copyright 2008 by <a href="http://domain.invalid/">you</a>.
+    </div>
+  </body>
+</html>

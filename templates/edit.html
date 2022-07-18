@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+
+{% block title %}{{ title }} - Edit{% endblock title %}
+
+{% block tabs %}
+<a href="/{{ path | as_str }}">view</a>
+<a href="/meta/edit/{{ path | as_str }}" class="active">edit</a>
+<a href="/meta/history/{{ path | as_str }}">history</a>
+{% endblock tabs %}
+
+{% block content %}
+<div id="toolbar">
+  <div>
+    <select id="format">
+      <option value="auto" selected>Auto</option>
+      {% for format in supported_formats %}
+      <option value="{{ format.0 }}">{{ format.1 }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div>
+    <div class="toggle">
+      <input id="preview-toggle" type="checkbox" autocomplete="off" />
+    </div>
+    <label for="preview-toggle">Preview</label>
+  </div>
+  <div>
+    <button id="save">Save</button>
+  </div>
+</div>
+<div id="editor"></div>
+<div id="preview"></div>
+{% endblock content %}
+
+{% block script %}
+<script type="module">
+  import { setup_editor } from '/bundle.js';
+
+  setup_editor();
+</script>
+{% endblock script %}

@@ -1,0 +1,17 @@
+(
+  listen_on: "0.0.0.0:3000",
+  allowed_mime_types: [
+    "application/x-tex",
+  ],
+  static_directory: "./static",
+  pages_directory: "./pages",
+  pages_git: (
+    repository: "git@your.repository.here",
+    private_key: "/app/id_desktop",
+    public_key: Some("/app/id_desktop.pub"),
+    username: "callym",
+    email: "hi@callym.com",
+  ),
+  templates_directory: "./templates",
+  katex_macros: {},
+)
