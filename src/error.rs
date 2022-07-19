@@ -41,6 +41,14 @@ pub enum Error {
   MissingField(&'static str),
   #[error("Session not found")]
   MissingSession,
+  #[error(transparent)]
+  Ron(#[from] ron::Error),
+  #[error("Cocoon error: {0:#?}")]
+  Cocoon(cocoon::Error),
+  #[error("User without name: {0}")]
+  UserWithoutName(String),
+  #[error("Unauthorised")]
+  Unauthorised,
 }
 
 impl IntoResponse for Error {
@@ -64,6 +72,10 @@ impl IntoResponse for Error {
       Self::UserCookie => StatusCode::INTERNAL_SERVER_ERROR,
       Self::MissingField(_) => StatusCode::BAD_REQUEST,
       Self::MissingSession => StatusCode::INTERNAL_SERVER_ERROR,
+      Self::Ron(_) => StatusCode::INTERNAL_SERVER_ERROR,
+      Self::Cocoon(_) => StatusCode::INTERNAL_SERVER_ERROR,
+      Self::UserWithoutName(_) => StatusCode::INTERNAL_SERVER_ERROR,
+      Self::Unauthorised => StatusCode::UNAUTHORIZED,
     };
 
     let data = match &self {
@@ -87,6 +99,10 @@ impl IntoResponse for Error {
       Self::UserCookie => serde_json::json!({}),
       Self::MissingField(field) => serde_json::json!({ "missing_field": field }),
       Self::MissingSession => serde_json::json!({}),
+      Self::Ron(_) => serde_json::json!({}),
+      Self::Cocoon(_) => serde_json::json!({}),
+      Self::UserWithoutName(_) => serde_json::json!({}),
+      Self::Unauthorised => serde_json::json!({}),
     };
 
     let message = format!("{self}");
@@ -103,5 +119,11 @@ impl IntoResponse for Error {
       })),
     )
       .into_response()
+  }
+}
+
+impl From<cocoon::Error> for Error {
+  fn from(err: cocoon::Error) -> Self {
+    Error::Cocoon(err)
   }
 }

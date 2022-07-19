@@ -20,6 +20,12 @@
           <li>Categories</li>
           <li>Random page</li>
           <li>Recent activity</li>
+          {% if user is role("Administrator") %}
+          <li>Admin</li>
+          {% endif %}
+          {% if user is not role("Administrator") %}
+          <li>Regular user</li>
+          {% endif %}
         </ul>
       </fieldset>
 
@@ -38,8 +44,9 @@
     <div id="header">
       <div id="account">
         {% if user %}
-          {{ user.email }}
-          (<a href="/meta/logout">log out</a>)
+          <a href="/meta/profile/{{ user.email }}">{{ user.name }} &LeftAngleBracket;{{ user.email }}&RightAngleBracket;</a>
+          &CenterDot;
+          <a href="/meta/logout">log out</a>
         {% else %}
           <a href="/meta/login">log in</a>
         {% endif %}

@@ -1,13 +1,9 @@
-use std::{
-  path::PathBuf,
-  sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 
-use axum::response::{Html, IntoResponse, Redirect};
+use axum::response::{Html, IntoResponse};
 use extract_frontmatter::{config::Splitter, Extractor};
-use tera::Tera;
 
-use crate::{auth::User, config::Config, context::Context, error::Error, pandoc::Format, State};
+use crate::{config::Config, context::Context, error::Error, pandoc::Format, user::User, State};
 
 pub struct Page {
   pub path: PathBuf,

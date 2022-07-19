@@ -1,24 +1,14 @@
 use std::{
-  path::{Path, PathBuf},
+  path::Path,
   sync::{Arc, Mutex},
 };
 
 use axum::response::{Html, IntoResponse};
-use git2::{
-  Cred,
-  CredentialType,
-  ErrorClass as Class,
-  ErrorCode as Code,
-  RemoteCallbacks,
-  Repository,
-  Signature,
-};
+use git2::{Cred, ErrorClass as Class, ErrorCode as Code, RemoteCallbacks, Repository, Signature};
 
-use crate::{auth::User, config::Config, error::Error, page::Page, State};
+use crate::{config::Config, error::Error, page::Page, user::User, State};
 
 pub struct Git {
-  url: String,
-  path: PathBuf,
   repository: Arc<Mutex<Repository>>,
   config: Arc<Config>,
 }
@@ -42,8 +32,6 @@ impl Git {
 
         return Ok(Git {
           repository: Arc::new(Mutex::new(repository)),
-          url: config.pages_git.repository.clone(),
-          path: config.pages_directory.clone(),
           config,
         });
       },
@@ -77,23 +65,14 @@ impl Git {
       })
       .clone(&config.pages_git.repository, &config.pages_directory)?;
 
-    repository
-      .config()?
-      .set_str("user.name", &config.pages_git.username)?;
-    repository
-      .config()?
-      .set_str("user.email", &config.pages_git.email)?;
-
     Ok(Git {
       repository: Arc::new(Mutex::new(repository)),
-      url: config.pages_git.repository.clone(),
-      path: config.pages_directory.clone(),
       config,
     })
   }
 
   pub fn add_file(&self, path: &Path) -> Result<(), Error> {
-    let mut repository = self.repository.lock().unwrap();
+    let repository = self.repository.lock().unwrap();
 
     let mut index = repository.index()?;
 
@@ -145,7 +124,7 @@ impl Git {
       )
     });
 
-    callbacks.push_update_reference(|reference, status| match status {
+    callbacks.push_update_reference(|_, status| match status {
       Some(err) => Err(git2::Error::new(
         git2::ErrorCode::GenericError,
         git2::ErrorClass::Repository,
@@ -193,7 +172,7 @@ impl Git {
     Ok(contents)
   }
 
-  pub fn file_history(&self, path: &Path, config: &Config) -> Result<Vec<Commit>, Error> {
+  pub fn file_history(&self, path: &Path, _: &Config) -> Result<Vec<Commit>, Error> {
     let repository = self.repository.lock().unwrap();
 
     let mut revwalk = repository.revwalk()?;

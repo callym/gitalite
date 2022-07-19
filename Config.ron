@@ -1,19 +1,47 @@
 (
+  // This is what IP and port to listen on for connections...
   listen_on: "0.0.0.0:3003",
+  // ...which is different to this - which is used for the IndieAuth protocol.
+  // For an example of where they'd be different - running behind a reverse proxy, you'd listen
+  // on `listen_on: "0.0.0.0:PORT"`, but your client ID would be `my-domain-name.com`.
   client_id: "localhost:3003",
+  // The allowed mime types always include `text/*` this is for other mime types that you want to support.
   allowed_mime_types: [
     "application/x-tex",
   ],
+  // For static files - JS, CSS, images, etc.
   static_directory: "./static",
+  // The location where the actual git repository backing the wiki is stored.
   pages_directory: "/app/pages",
+  // The details of the git repository:
   pages_git: (
+    // The repository URL.
     repository: "git@github.com:callym/gitalite-wiki.git",
+    // The location of the private key file that has permission to pull/push to the repo above.
     private_key: "/app/id_ed25519",
+    // The location of the public key file that goes with the private key.
     public_key: Some("/app/id_ed25519.pub"),
-    username: "callym",
-    email: "hi@callym.com",
   ),
+  // The location of the Tera template files.
   templates_directory: "./templates",
+  // Additional macros that you want to support in KaTeX.
   katex_macros: {},
+  // The URL for the Postgres database that holds the user session data.
   postgresql: "postgres://postgres:postgres@localhost:5432/postgres",
+  // Authenticated/authorised users are stored in a simple "database" file.
+  users: (
+    // When starting up the server, if this database doesn't exist, it'll be
+    // created with this user - who will have administrator rights.
+    // Note that to actually log in with this user, you'll need an IndieAuth server
+    // hooked up to the URL you put here.
+    initial: (
+      name: "callym",
+      email: "hi@callym.com",
+      url: "http://localhost:3002/callym",
+    ),
+    // This is a file that will be used as the password for the user database. It should probably be random bytes.
+    password: "/app/password",
+    // The location of the database. If it doesn't exist, it'll be created at this path.
+    database: "/app/users.cocoon",
+  )
 )

@@ -1,4 +1,4 @@
-use crate::auth::User;
+use crate::user::User;
 
 #[derive(serde::Serialize)]
 pub struct Context {

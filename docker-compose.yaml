@@ -13,6 +13,8 @@ services:
       - ./static/:/app/static
       - ./templates/:/app/templates
       - ./Config.ron:/app/Config.ron
+      - ./password:/app/password
+      - ./users.cocoon:/app/users.cocoon
     environment:
       - CONFIG=Config.ron
       - RUST_LOG=off,gitalite=info

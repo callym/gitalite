@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Create new page{% endblock title %}
+
+{% block tabs %}
+{% endblock tabs %}
+
+{% block content %}
+  {% if user %}
+    <div>
+      {{ user | json_encode(pretty=true) | safe }}
+    </div>
+  {% endif %}
+  <h1>{{ profile.name }}</h1>
+
+  <ul>
+    <li>
+      <a href="{{ profile.url }}">{{ profile.url }}</a>
+    </li>
+    <li>
+      <a href="mailto:{{ profile.email }}">{{ profile.email }}</a>
+    </li>
+  </ul>
+{% endblock content %}
+
+{% block script %}
+{% endblock script %}

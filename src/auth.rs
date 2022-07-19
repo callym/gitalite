@@ -1,50 +1,25 @@
-use std::{fmt::Debug, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{str::FromStr, sync::Arc};
 
-use async_session::{MemoryStore, Session, SessionStore, SessionStore as _};
+use async_session::{Session, SessionStore};
 use async_sqlx_session::PostgresSessionStore;
 use axum::{
   async_trait,
   extract::{Extension, FromRequest, Query, RequestParts, TypedHeader},
   headers::Cookie,
-  http::{
-    self,
-    header::{HeaderMap, HeaderValue},
-    StatusCode,
-    Uri,
-  },
   response::{Html, IntoResponse, Redirect},
-  routing::get,
   Form,
-  Json,
-  Router,
 };
 use axum_extra::extract::cookie::{Cookie as CookieExt, CookieJar};
-use indieweb::standards::indieauth::{self, Client, Profile, Scopes, Token};
-use oauth2::{url::Url, ClientId, PkceCodeVerifier, RedirectUrl};
+use indieweb::standards::indieauth::{self, Client, Scopes};
+use oauth2::{url::Url, ClientId, RedirectUrl};
 use serde::{Deserialize, Serialize};
 
-use crate::{config::Config, error::Error, State};
-
-pub async fn discover(url: Url) {
-  let client = indieweb::http::ureq::Client::default();
-  let discovered = dbg!(indieweb::standards::indieauth::discover(&client, &url).await).unwrap();
-
-  let client_id = "https://wiki.callym.com/";
-  let redirect_uri = "https://wiki.callym.com/meta/login-callback";
-  let scope = "profile+email";
-
-  // let req = AuthenticationRequest::new(
-  //   &url.to_string(),
-  //   client_id,
-  //   &discovered.authorization_endpoints[0].to_string(),
-  //   Some(redirect_uri.to_string()),
-  //   Some(vec![scope.to_string()]),
-  // )
-  // .unwrap();
-
-  // let url = dbg!(req.construct_url());
-  // dbg!(req.get_pkce_verifier());
-}
+use crate::{
+  config::Config,
+  error::Error,
+  user::{User, UserKey},
+  State,
+};
 
 #[derive(Debug, serde::Deserialize)]
 pub struct Params {
@@ -52,7 +27,9 @@ pub struct Params {
   state: String,
 }
 
-pub async fn login_handler(state: Arc<State>) -> Result<impl IntoResponse, Error> {
+pub async fn login_handler(
+  Extension(state): Extension<Arc<State>>,
+) -> Result<impl IntoResponse, Error> {
   {
     let mut tera = state.tera.lock().unwrap();
     tera.full_reload()?;
@@ -82,7 +59,7 @@ pub async fn authenticate_handler(
   Form(params): Form<AuthenticateParams>,
   mut jar: CookieJar,
   store: Extension<PostgresSessionStore>,
-  state: Arc<State>,
+  Extension(state): Extension<Arc<State>>,
 ) -> Result<impl IntoResponse, Error> {
   // Get session from the cookie
   let session = match jar.get(SESSION_COOKIE_NAME).cloned() {
@@ -98,12 +75,11 @@ pub async fn authenticate_handler(
 
   // Remove any active sessions, if there are any
   if let Some((cookie, session)) = session {
-    store.destroy_session(session).await;
+    store.destroy_session(session).await?;
     jar = jar.remove(cookie);
   }
 
-  let (redirect, session) = User::authenticate(&params.url, &state.config).await?;
-  let id = session.id().to_string();
+  let (redirect, session) = authenticate(&params.url, &state.config).await?;
   let cookie = store.store_session(session).await.unwrap().unwrap();
 
   let cookie = CookieExt::build(SESSION_COOKIE_NAME, cookie)
@@ -119,7 +95,7 @@ pub async fn callback_handler(
   Query(params): Query<Params>,
   mut jar: CookieJar,
   store: Extension<PostgresSessionStore>,
-  state: Arc<State>,
+  Extension(state): Extension<Arc<State>>,
 ) -> Result<impl IntoResponse, Error> {
   // Get session from the cookie
   let session = match jar.get(SESSION_COOKIE_NAME).cloned() {
@@ -143,7 +119,7 @@ pub async fn callback_handler(
           log::info!("Session is invalid.");
         }
 
-        store.destroy_session(session).await;
+        store.destroy_session(session).await?;
         jar = jar.remove(cookie);
 
         return Ok((jar, Redirect::to("/meta/login")));
@@ -154,7 +130,7 @@ pub async fn callback_handler(
       if session.get_raw("login").is_none() {
         log::info!("Session doesn't have a `login` key.");
 
-        store.destroy_session(session).await;
+        store.destroy_session(session).await?;
         jar = jar.remove(cookie);
 
         return Ok((jar, Redirect::to("/meta/login")));
@@ -177,17 +153,14 @@ pub async fn callback_handler(
     },
   };
 
-  let user =
-    User::authenticate_callback(&session, params.code, params.state, &state.config).await?;
+  let user = authenticate_callback(&session, params.code, params.state, &state).await?;
 
   // Here we've authenticated successfully, so we can remove the `login` cookie...
   store.destroy_session(session).await.unwrap();
   jar = jar.remove(cookie);
 
-  let session = user.to_session();
-  let id = session.id().to_string();
+  let session = user.key().to_session();
   // ...and add the user-session cookie!
-  log::info!("{:#?}", session);
   let cookie = store.store_session(session).await.unwrap().unwrap();
 
   let cookie = CookieExt::build(SESSION_COOKIE_NAME, cookie)
@@ -201,20 +174,6 @@ pub async fn callback_handler(
 
 const SESSION_COOKIE_NAME: &str = "gitalite_session";
 
-#[derive(Serialize, Deserialize, PartialEq, Eq, Copy, Clone, Debug)]
-pub enum Role {
-  Administrator,
-}
-
-#[derive(Serialize, Deserialize, Clone, Debug)]
-pub struct User {
-  pub name: String,
-  pub url: Url,
-  pub email: String,
-  pub approved: bool,
-  pub roles: Vec<Role>,
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct Login {
   authorization_endpoint: Url,
@@ -225,156 +184,173 @@ pub struct Login {
   csrf_token: String,
 }
 
-impl User {
-  pub async fn setup(app: axum::Router, config: impl AsRef<Config>) -> Result<axum::Router, Error> {
-    let store = PostgresSessionStore::new(&config.as_ref().postgresql)
-      .await
-      .unwrap();
-    store.migrate().await.unwrap();
+pub async fn setup(app: axum::Router, state: Arc<State>) -> Result<axum::Router, Error> {
+  let store = PostgresSessionStore::new(&state.config.postgresql)
+    .await
+    .unwrap();
+  store.migrate().await.unwrap();
 
-    Ok(app.layer(Extension(store)))
-  }
+  Ok(app.layer(Extension(store)))
+}
 
-  pub fn from_session(session: &Session) -> Result<Self, Error> {
-    dbg!(session);
-    let data = session.get("data").ok_or(Error::MissingSession)?;
+pub async fn authenticate(url: &Url, config: impl AsRef<Config>) -> Result<(Url, Session), Error> {
+  let config = config.as_ref();
+  let http_client = indieweb::http::ureq::Client::default();
 
-    Ok(data)
-  }
+  let discovered = indieauth::discover(&http_client, url).await.unwrap();
 
-  pub fn to_session(&self) -> Session {
-    let mut session = Session::new();
+  let client_id = &config.client_id;
+  let client_id = ClientId::new(client_id.into());
 
-    session.insert("data", self);
+  let redirect_uri = format!("{}/meta/login-callback", config.client_id);
+  let redirect_uri = RedirectUrl::new(redirect_uri.into()).unwrap();
 
-    session
-  }
+  let scope = Scopes::from_str("profile email").unwrap();
 
-  pub async fn authenticate(
-    url: &Url,
-    config: impl AsRef<Config>,
-  ) -> Result<(Url, Session), Error> {
-    let config = config.as_ref();
-    let http_client = indieweb::http::ureq::Client::default();
+  let authorization_endpoint = discovered
+    .authorization_endpoints
+    .map(|end| end.first().cloned())
+    .flatten()
+    .ok_or(Error::MissingAuthEndpoint)?;
+  let authorization_endpoint = indieauth::AuthUrl::from_url(authorization_endpoint);
 
-    let discovered = indieauth::discover(&http_client, url).await.unwrap();
+  let token_endpoint = discovered
+    .token_endpoints
+    .map(|end| end.first().cloned())
+    .flatten()
+    .ok_or(Error::MissingTokenEndpoint)?;
+  let token_endpoint = indieauth::TokenUrl::from_url(token_endpoint);
 
-    let client_id = &config.client_id;
-    let client_id = ClientId::new(client_id.into());
+  let client = indieauth::StockClient::from((
+    client_id,
+    authorization_endpoint.clone(),
+    token_endpoint.clone(),
+  ));
 
-    let redirect_uri = format!("{}/meta/login-callback", config.client_id);
-    let redirect_uri = RedirectUrl::new(redirect_uri.into()).unwrap();
-
-    let scope = Scopes::from_str("profile email").unwrap();
-
-    let authorization_endpoint = discovered
-      .authorization_endpoints
-      .map(|end| end.first().cloned())
-      .flatten()
-      .ok_or(Error::MissingAuthEndpoint)?;
-    let authorization_endpoint = indieauth::AuthUrl::from_url(authorization_endpoint);
-
-    let token_endpoint = discovered
-      .token_endpoints
-      .map(|end| end.first().cloned())
-      .flatten()
-      .ok_or(Error::MissingTokenEndpoint)?;
-    let token_endpoint = indieauth::TokenUrl::from_url(token_endpoint);
-
-    let client = indieauth::StockClient::from((
-      client_id,
-      authorization_endpoint.clone(),
-      token_endpoint.clone(),
-    ));
-
-    let (verifier, challenge, url, csrf_token) = match client.dispatch(
-      &http_client,
-      indieauth::Request::BuildAuthorizationUrl {
-        scope: Some(scope),
-        redirect_uri: Some(redirect_uri),
-        me: Some(url.clone()),
-      },
-    )? {
-      indieauth::Response::AuthenticationUrl {
-        verifier,
-        challenge,
-        url,
-        csrf_token,
-      } => (verifier, challenge, url, csrf_token),
-      _ => unreachable!(),
-    };
-
-    let mut session = Session::new();
-
-    session.insert(
-      "login",
-      Login {
-        authorization_endpoint: authorization_endpoint.url().clone(),
-        token_endpoint: token_endpoint.url().clone(),
-        verifier,
-        challenge,
-        url: url.clone(),
-        csrf_token,
-      },
-    )?;
-
-    {
-      use time::ext::NumericalStdDuration;
-
-      session.expire_in(1.std_hours());
-    }
-
-    Ok((url, session))
-  }
-
-  pub async fn authenticate_callback(
-    session: &Session,
-    code: String,
-    state: String,
-    config: impl AsRef<Config>,
-  ) -> Result<Self, Error> {
-    let config = config.as_ref();
-    let http_client = indieweb::http::ureq::Client::default();
-
-    let login: Login = session.get("login").unwrap();
-
-    let client_id = &config.client_id;
-    let client_id = ClientId::new(client_id.into());
-
-    let redirect_uri = format!("{}/meta/login-callback", config.client_id);
-    let redirect_uri = RedirectUrl::new(redirect_uri.into()).unwrap();
-
-    let client = indieauth::StockClient::from((
-      client_id,
-      indieauth::AuthUrl::from_url(login.authorization_endpoint.clone()),
-      indieauth::TokenUrl::from_url(login.token_endpoint.clone()),
-    ));
-
-    let profile = match client.dispatch(
-      &http_client,
-      indieauth::Request::CompleteAuthorization {
-        resource: indieauth::DesiredResourceAuthorization::Profile,
-        code: indieauth::AuthorizationCode::new(code),
-        code_verifier: login.verifier,
-        redirect_uri: Some(redirect_uri),
-      },
-    )? {
-      indieauth::Response::Profile(profile) => profile,
-      _ => unreachable!(),
-    };
-
-    let name = profile.name.ok_or(Error::MissingField("name"))?;
-    let email = profile.email.ok_or(Error::MissingField("email"))?;
-    let url = profile.url.ok_or(Error::MissingField("url"))?;
-
-    Ok(Self {
-      approved: false,
-      roles: Vec::new(),
-      name,
-      email,
+  let (verifier, challenge, url, csrf_token) = match client.dispatch(
+    &http_client,
+    indieauth::Request::BuildAuthorizationUrl {
+      scope: Some(scope),
+      redirect_uri: Some(redirect_uri),
+      me: Some(url.clone()),
+    },
+  )? {
+    indieauth::Response::AuthenticationUrl {
+      verifier,
+      challenge,
       url,
-    })
+      csrf_token,
+    } => (verifier, challenge, url, csrf_token),
+    _ => unreachable!(),
+  };
+
+  let mut session = Session::new();
+
+  session.insert(
+    "login",
+    Login {
+      authorization_endpoint: authorization_endpoint.url().clone(),
+      token_endpoint: token_endpoint.url().clone(),
+      verifier,
+      challenge,
+      url: url.clone(),
+      csrf_token,
+    },
+  )?;
+
+  {
+    use time::ext::NumericalStdDuration;
+
+    session.expire_in(1.std_hours());
   }
+
+  Ok((url, session))
+}
+
+pub async fn authenticate_callback(
+  session: &Session,
+  code: String,
+  auth_state: String,
+  state: &Arc<State>,
+) -> Result<User, Error> {
+  let http_client = indieweb::http::ureq::Client::default();
+
+  let login: Login = session.get("login").unwrap();
+
+  let client_id = &state.config.client_id;
+  let client_id = ClientId::new(client_id.into());
+
+  let redirect_uri = format!("{}/meta/login-callback", state.config.client_id);
+  let redirect_uri = RedirectUrl::new(redirect_uri.into()).unwrap();
+
+  let client = indieauth::StockClient::from((
+    client_id,
+    indieauth::AuthUrl::from_url(login.authorization_endpoint.clone()),
+    indieauth::TokenUrl::from_url(login.token_endpoint.clone()),
+  ));
+
+  let profile = match client.dispatch(
+    &http_client,
+    indieauth::Request::CompleteAuthorization {
+      resource: indieauth::DesiredResourceAuthorization::Profile,
+      code: indieauth::AuthorizationCode::new(code),
+      code_verifier: login.verifier,
+      redirect_uri: Some(redirect_uri),
+    },
+  )? {
+    indieauth::Response::Profile(profile) => profile,
+    _ => unreachable!(),
+  };
+
+  let email = profile.email.ok_or(Error::MissingField("email"))?;
+  let name = profile.name.ok_or(Error::MissingField("name"))?;
+  let url = profile.url.ok_or(Error::MissingField("url"))?;
+
+  let user = {
+    let key = UserKey::from(email.clone());
+    let mut users = state.users.lock().unwrap();
+
+    match users.get(&key) {
+      Some(user) => {
+        let mut new_user = user.clone();
+
+        if new_user.name != name {
+          log::info!("Updating name for {}", &email);
+          new_user.name = name;
+        }
+
+        if new_user.url != url {
+          log::info!("Updating url for {}", &email);
+          new_user.url = url;
+        }
+
+        if new_user.email != email {
+          log::info!("Updating email for {}", &email);
+          new_user.email = email;
+        }
+
+        if new_user != *user {
+          users.set(new_user.clone())?;
+        }
+
+        new_user
+      },
+      None => {
+        let user = User {
+          name,
+          email,
+          url: url.into(),
+          approved: false,
+          roles: Vec::new(),
+        };
+
+        users.set(user.clone())?;
+        user
+      },
+    }
+  };
+
+  Ok(user)
 }
 
 #[async_trait]
@@ -388,6 +364,9 @@ where
     let Extension(store) = Extension::<PostgresSessionStore>::from_request(req)
       .await
       .expect("`PostgresSessionStore` extension missing");
+    let Extension(state) = Extension::<Arc<State>>::from_request(req)
+      .await
+      .expect("`State` extension missing");
 
     let cookie = Option::<TypedHeader<Cookie>>::from_request(req)
       .await
@@ -409,26 +388,10 @@ where
       .unwrap()
       .unwrap();
 
-    Ok(User::from_session(&session)?)
-  }
-}
-
-pub struct Is<const ROLE: Role>;
-
-#[async_trait]
-impl<const ROLE: Role, B> FromRequest<B> for Is<ROLE>
-where
-  B: Send,
-{
-  type Rejection = Error;
-
-  async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
-    let user = User::from_request(req).await?;
-
-    if user.roles.contains(&ROLE) {
-      return Ok(Self);
-    }
-
-    unimplemented!()
+    let users = state.users.lock().unwrap();
+    users
+      .get(&UserKey::from_session(&session)?)
+      .ok_or(Error::Unauthorised)
+      .cloned()
   }
 }

@@ -10,18 +10,20 @@ use axum::{
   http::{header, Request},
   response::{Html, IntoResponse, Redirect, Response},
   routing::{get, post},
+  Extension,
   Json,
   Router,
 };
 use git::Git;
 use page::Page;
 use tera::{Context, Tera};
+use user::UserDb;
 
 use crate::{
-  auth::User,
   config::{Args, Config},
   error::Error,
   pandoc::{Format, QueryFormat},
+  user::User,
 };
 
 mod auth;
@@ -31,12 +33,15 @@ mod error;
 mod git;
 mod page;
 mod pandoc;
+mod role;
+mod user;
 
 #[derive(Clone)]
 pub struct State {
   config: Arc<Config>,
   git: Arc<Git>,
   tera: Arc<Mutex<Tera>>,
+  users: Arc<Mutex<UserDb>>,
 }
 
 #[tokio::main]
@@ -69,7 +74,15 @@ async fn main() -> Result<(), eyre::Report> {
   )?;
   let tera = Arc::new(Mutex::new(tera));
 
-  let state = State { config, git, tera };
+  let users = UserDb::new(config.clone()).await?;
+  let users = Arc::new(Mutex::new(users));
+
+  let state = State {
+    config,
+    git,
+    tera,
+    users,
+  };
   let state = Arc::new(state);
 
   pandoc::test_output()?;
@@ -78,71 +91,45 @@ async fn main() -> Result<(), eyre::Report> {
   let app = Router::new()
     .route(
       "/meta/login",
-      get({
-        let state = Arc::clone(&state);
-        move || auth::login_handler(state)
-      })
-      .post({
-        let state = Arc::clone(&state);
-        move |body, jar, store| auth::authenticate_handler(body, jar, store, state)
+      get(|state| auth::login_handler(state)).post({
+        move |body, jar, store, state| auth::authenticate_handler(body, jar, store, state)
       }),
     )
     .route(
       "/meta/login-callback",
-      get({
-        let state = Arc::clone(&state);
-        move |query, jar, store| auth::callback_handler(query, jar, store, state)
-      }),
+      get(|query, jar, store, state| auth::callback_handler(query, jar, store, state)),
+    )
+    .route(
+      "/meta/profile/:user",
+      get(|jar, store, state| user::profile_handler(jar, store, state)),
     )
     .route(
       "/meta/new/*path",
-      get({
-        let state = Arc::clone(&state);
-        move |path, user| get_new(path, user, state)
-      })
-      .post({
-        let state = Arc::clone(&state);
-        move |path, body, user| new(path, body, user, state)
-      }),
+      get(|path, user, state| get_new(path, user, state))
+        .post(|path, body, user, state| new(path, body, user, state)),
     )
     .route(
       "/meta/history/*path",
-      get({
-        let state = Arc::clone(&state);
-        move |path, user| history(path, user, state)
-      }),
+      get(|path, user, state| history(path, user, state)),
     )
     .route(
       "/meta/edit/*path",
-      get({
-        let state = Arc::clone(&state);
-        move |path, user| edit(path, user, state)
-      })
-      .post({
-        let state = Arc::clone(&state);
-        move |body, path, user| save(path, body, user, state)
-      }),
+      get(|path, user, state| edit(path, user, state))
+        .post(|body, path, user, state| save(path, body, user, state)),
     )
     .route(
       "/meta/raw/*path",
-      get({
-        let state = Arc::clone(&state);
-        move |path, user| raw(path, user, state)
-      }),
+      get(|path, user, state| raw(path, user, state)),
     )
     .route(
       "/meta/render",
-      post({
-        let state = Arc::clone(&state);
-        move |body, format| render(body, format, state)
-      }),
+      post(|body, format, state| render(body, format, state)),
     )
-    .fallback(get({
-      let state = Arc::clone(&state);
-      move |request| route(request, state)
-    }));
+    .fallback(get(|request| route(request)));
 
-  let app = User::setup(app, &state.config).await?;
+  let app = auth::setup(app, state.clone()).await?;
+  let app = role::setup(app, state.clone()).await?;
+  let app = app.layer(Extension(state.clone()));
 
   log::info!("listening on {}", state.config.listen_on);
   axum::Server::bind(&state.config.listen_on)
@@ -168,7 +155,7 @@ struct RouteQuery {
   revision: Option<String>,
 }
 
-async fn route<T: Send>(request: Request<T>, state: Arc<State>) -> Response {
+async fn route<T: Send>(request: Request<T>) -> Response {
   let path = request.uri().path();
   let path = path.strip_prefix("/").unwrap();
   let path = match dbg!(urlencoding::decode(path)) {
@@ -182,6 +169,10 @@ async fn route<T: Send>(request: Request<T>, state: Arc<State>) -> Response {
 
   let mut parts = RequestParts::new(request);
   let user = Option::<User>::from_request(&mut parts).await.unwrap();
+
+  let Extension(state) = Extension::<Arc<State>>::from_request(&mut parts)
+    .await
+    .expect("`State` extension missing");
 
   let static_path = state.config.static_directory.join(&path);
   if static_path.is_file() {
@@ -223,7 +214,11 @@ async fn route<T: Send>(request: Request<T>, state: Arc<State>) -> Response {
   return page.view_handler(state.clone()).await.into_response();
 }
 
-async fn history(Path(path): Path<String>, user: Option<User>, state: Arc<State>) -> Response {
+async fn history(
+  Path(path): Path<String>,
+  user: Option<User>,
+  Extension(state): Extension<Arc<State>>,
+) -> Response {
   let path = path.strip_prefix("/").unwrap();
   let path = PathBuf::from(path);
 
@@ -257,7 +252,11 @@ async fn history(Path(path): Path<String>, user: Option<User>, state: Arc<State>
     .into_response()
 }
 
-async fn edit(Path(path): Path<String>, user: Option<User>, state: Arc<State>) -> Response {
+async fn edit(
+  Path(path): Path<String>,
+  user: Option<User>,
+  Extension(state): Extension<Arc<State>>,
+) -> Response {
   let path = path.strip_prefix("/").unwrap();
   let path = PathBuf::from(path);
 
@@ -290,7 +289,7 @@ async fn save(
   Path(url_path): Path<String>,
   body: String,
   user: User,
-  state: Arc<State>,
+  Extension(state): Extension<Arc<State>>,
 ) -> Response {
   let path = url_path.strip_prefix("/").unwrap();
   let path = PathBuf::from(path);
@@ -323,7 +322,11 @@ async fn save(
   }
 }
 
-async fn get_new(Path(path): Path<String>, user: Option<User>, state: Arc<State>) -> Response {
+async fn get_new(
+  Path(path): Path<String>,
+  user: Option<User>,
+  Extension(state): Extension<Arc<State>>,
+) -> Response {
   let path = path.strip_prefix("/").unwrap();
 
   let dir = std::env::current_dir().unwrap();
@@ -363,7 +366,7 @@ async fn new(
   Path(url_path): Path<String>,
   Json(new_page): Json<NewPage>,
   user: User,
-  state: Arc<State>,
+  Extension(state): Extension<Arc<State>>,
 ) -> Response {
   let path = url_path.strip_prefix("/").unwrap();
   let path = PathBuf::from(path);
@@ -385,7 +388,11 @@ async fn new(
   }
 }
 
-async fn raw(Path(path): Path<String>, user: Option<User>, state: Arc<State>) -> Response {
+async fn raw(
+  Path(path): Path<String>,
+  user: Option<User>,
+  Extension(state): Extension<Arc<State>>,
+) -> Response {
   let path = path.strip_prefix("/").unwrap();
   let path = PathBuf::from(path);
 
@@ -414,7 +421,11 @@ async fn raw(Path(path): Path<String>, user: Option<User>, state: Arc<State>) ->
   page.raw().await.into_response()
 }
 
-async fn render(body: String, format: Option<Query<QueryFormat>>, state: Arc<State>) -> Response {
+async fn render(
+  body: String,
+  format: Option<Query<QueryFormat>>,
+  Extension(state): Extension<Arc<State>>,
+) -> Response {
   let format = format.map(|query| query.0);
 
   tokio::task::spawn_blocking(move || {

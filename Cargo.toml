@@ -12,6 +12,7 @@ async-sqlx-session = { version = "0.4", features = ["pg"] }
 axum = { version = "0.5", features = ["headers"] }
 axum-extra = { version = "0.3", features = ["cookie"] }
 clap = { version = "3.1", features = ["derive"] }
+cocoon = "0.3.1"
 color-eyre = "0.6"
 extract-frontmatter = "4.1"
 eyre = "0.6"
