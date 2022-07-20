@@ -21,6 +21,20 @@
       <a href="mailto:{{ profile.email }}">{{ profile.email }}</a>
     </li>
   </ul>
+
+  <ol id="commits">
+  {% for commit in recent_commits %}
+  <li>
+    <div class="date">{{ commit.date | date(format="%Y-%m-%d %H:%M") }}</div>
+    <div class="message">{{ commit.message }}</a></div>
+    <ol class="files">
+      {% for file in commit.files %}
+        <li><a href="/{{ file | as_str }}?revision={{ commit.hash }}">{{ file }}</a></li>
+      {% endfor %}
+    </ol>
+  </li>
+  {% endfor %}
+</ol>
 {% endblock content %}
 
 {% block script %}

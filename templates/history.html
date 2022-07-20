@@ -4,7 +4,7 @@
 
 {% block tabs %}
 <a href="/{{ path | as_str }}">view</a>
-<a>edit</a>
+<a href="/meta/edit/{{ path | as_str }}">edit</a>
 <a href="/meta/history/{{ path | as_str }}" class="active">history</a>
 {% endblock tabs %}
 
@@ -13,7 +13,13 @@
   {% for commit in commits %}
   <li>
     <div class="date">{{ commit.date | date(format="%Y-%m-%d %H:%M") }}</div>
-    <div class="author">({{ commit.author }})</div>
+    <div class="author">
+      {% if commit.author.User %}
+        <a href="/meta/profile/{{ user.email }}">{{ user.name }} &LeftAngleBracket;{{ user.email }}&RightAngleBracket;</a>
+      {% elif commit.author.NotUser %}
+        {{ user.name }} &LeftAngleBracket;{{ user.email }}&RightAngleBracket;
+      {% endif %}
+    </div>
     <div class="message"><a href="/{{ path | as_str }}?revision={{ commit.hash }}">{{ commit.message }}</a></div>
   </li>
   {% endfor %}

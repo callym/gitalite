@@ -20,6 +20,12 @@ use crate::{config::Config, error::Error, role::Role, State};
 #[derive(Serialize, Deserialize, Clone, Debug, Hash, PartialEq, Eq)]
 pub struct UserKey(String);
 
+impl UserKey {
+  pub fn email(&self) -> &str {
+    &self.0
+  }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UserValue(Url);
 
@@ -159,6 +165,9 @@ pub async fn profile_handler(
   context.insert("profile", &profile);
 
   tokio::task::spawn_blocking(move || {
+    let recent_commits = state.git.user_history(&profile.key(), Some(10), &state)?;
+    context.insert("recent_commits", &recent_commits);
+
     let tera = state.tera.lock().unwrap();
 
     let rendered = tera.render("profile.html", &context)?;

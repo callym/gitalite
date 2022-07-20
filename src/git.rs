@@ -1,12 +1,27 @@
 use std::{
-  path::Path,
+  ops::Deref,
+  path::{Path, PathBuf},
   sync::{Arc, Mutex},
 };
 
 use axum::response::{Html, IntoResponse};
-use git2::{Cred, ErrorClass as Class, ErrorCode as Code, RemoteCallbacks, Repository, Signature};
+use git2::{
+  Cred,
+  ErrorClass as Class,
+  ErrorCode as Code,
+  Oid,
+  RemoteCallbacks,
+  Repository,
+  Signature,
+};
 
-use crate::{config::Config, error::Error, page::Page, user::User, State};
+use crate::{
+  config::Config,
+  error::Error,
+  page::Page,
+  user::{User, UserDb, UserKey},
+  State,
+};
 
 pub struct Git {
   repository: Arc<Mutex<Repository>>,
@@ -14,11 +29,92 @@ pub struct Git {
 }
 
 #[derive(serde::Serialize)]
+pub enum Author {
+  User(User),
+  NonUser { name: String, email: Option<String> },
+}
+
+impl Author {
+  pub fn from_signature(signature: &Signature, users: impl Deref<Target = UserDb>) -> Self {
+    let users = users.deref();
+
+    signature
+      .email()
+      .map(|email| {
+        let user = users.get(&UserKey::from(email.to_string()))?;
+
+        Some(Author::User(user.clone()))
+      })
+      .flatten()
+      .unwrap_or_else(|| {
+        let name = signature.name().unwrap_or("Unknown").to_string();
+        let email = signature.email().map(|email| email.to_string());
+
+        Author::NonUser { name, email }
+      })
+  }
+
+  pub fn email(&self) -> Option<&str> {
+    match self {
+      Author::User(User { email, .. }) => Some(email),
+      Author::NonUser { email, .. } => email.as_deref(),
+    }
+  }
+}
+
+#[derive(serde::Serialize)]
 pub struct Commit {
-  author: String,
+  author: Author,
   hash: String,
   date: String,
   message: String,
+  files: Vec<PathBuf>,
+}
+
+impl Commit {
+  fn from_repository(
+    id: Oid,
+    repository: &impl Deref<Target = Repository>,
+    users: impl Deref<Target = UserDb>,
+  ) -> Result<Commit, Error> {
+    let commit = repository.find_commit(id)?;
+
+    let files = match commit.parent_count() {
+      0 => Vec::new(),
+      _ => {
+        let tree = commit.tree()?;
+
+        let parent = commit.parent(0)?;
+        let parent_tree = parent.tree()?;
+
+        let diff = repository.diff_tree_to_tree(Some(&parent_tree), Some(&tree), None)?;
+
+        diff
+          .deltas()
+          .map(|delta| delta.new_file().path().unwrap().to_path_buf())
+          .collect()
+      },
+    };
+
+    let message = commit.message().unwrap().to_string();
+    let hash = commit.id().to_string();
+
+    let date = commit.time();
+    let date = time::OffsetDateTime::from_unix_timestamp(date.seconds()).unwrap();
+    let date = date
+      .format(&time::format_description::well_known::Rfc3339)
+      .unwrap();
+
+    let author = Author::from_signature(&commit.author(), users);
+
+    Ok(Commit {
+      author,
+      hash,
+      date,
+      message,
+      files,
+    })
+  }
 }
 
 impl Git {
@@ -172,7 +268,7 @@ impl Git {
     Ok(contents)
   }
 
-  pub fn file_history(&self, path: &Path, _: &Config) -> Result<Vec<Commit>, Error> {
+  pub fn file_history(&self, path: &Path, state: &State) -> Result<Vec<Commit>, Error> {
     let repository = self.repository.lock().unwrap();
 
     let mut revwalk = repository.revwalk()?;
@@ -183,44 +279,50 @@ impl Git {
 
     for id in revwalk {
       let id = id?;
-      let commit = repository.find_commit(id)?;
+      let users = state.users.lock().unwrap();
+      let commit = Commit::from_repository(id, &repository, users)?;
 
-      if commit.parent_count() != 1 {
-        continue;
+      if commit
+        .files
+        .iter()
+        .find(|commit_path| **commit_path == path)
+        .is_some()
+      {
+        commits.push(commit);
+      }
+    }
+
+    Ok(commits)
+  }
+
+  pub fn user_history(
+    &self,
+    user: &UserKey,
+    limit: Option<usize>,
+    state: &State,
+  ) -> Result<Vec<Commit>, Error> {
+    let repository = self.repository.lock().unwrap();
+
+    let mut revwalk = repository.revwalk()?;
+    revwalk.set_sorting(git2::Sort::TIME)?;
+    revwalk.push_head()?;
+
+    let mut commits = Vec::new();
+
+    for id in revwalk {
+      match limit {
+        Some(limit) if limit == commits.len() => return Ok(commits),
+        _ => (),
       }
 
-      let tree = commit.tree()?;
+      let id = id?;
+      let users = state.users.lock().unwrap();
+      let commit = Commit::from_repository(id, &repository, users)?;
 
-      let parent = commit.parent(0)?;
-      let parent_tree = parent.tree()?;
-
-      let diff = repository.diff_tree_to_tree(Some(&parent_tree), Some(&tree), None)?;
-
-      for delta in diff.deltas() {
-        let delta_path = delta.new_file().path().unwrap();
-
-        if delta_path != path {
-          continue;
-        }
-
-        let message = commit.message().unwrap().to_string();
-
-        let date = commit.time();
-        let date = time::OffsetDateTime::from_unix_timestamp(date.seconds()).unwrap();
-        let date = date
-          .format(&time::format_description::well_known::Rfc3339)
-          .unwrap();
-
-        let author = commit.author().name().unwrap().to_owned();
-        let hash = commit.id().to_string();
-
-        commits.push(Commit {
-          author,
-          hash,
-          date,
-          message,
-        })
-      }
+      match commit.author.email() {
+        Some(email) if email == user.email() => commits.push(commit),
+        _ => (),
+      };
     }
 
     Ok(commits)
@@ -263,7 +365,7 @@ impl Git {
     let path = dbg!(path.to_owned());
 
     let render = tokio::task::spawn_blocking(move || {
-      let file_history = self.file_history(&path, &state.config)?;
+      let file_history = self.file_history(&path, &state)?;
       context.insert("commits", &file_history);
 
       let tera = state.tera.lock().unwrap();
