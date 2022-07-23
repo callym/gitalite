@@ -2,10 +2,11 @@ use std::{path::PathBuf, string::FromUtf8Error, sync::Arc};
 
 use axum::{
   async_trait,
-  extract::{rejection::PathRejection, FromRequest, RequestParts},
+  extract::{rejection::PathRejection, FromRequest, Path, RequestParts},
   http::StatusCode,
-  response::{Html, IntoResponse},
+  response::{Html, IntoResponse, Redirect, Response},
   Extension,
+  Json,
 };
 use extract_frontmatter::{config::Splitter, Extractor};
 
@@ -29,10 +30,12 @@ pub enum Error {
   User(#[from] crate::user::Error),
   #[error(transparent)]
   Utf8(#[from] FromUtf8Error),
+  #[error(transparent)]
+  Path(#[from] PagePathError),
 }
 
 impl IntoResponse for Error {
-  fn into_response(self) -> axum::response::Response {
+  fn into_response(self) -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
   }
 }
@@ -243,6 +246,105 @@ impl Page {
   }
 }
 
+pub async fn history_handler(page: Page, Extension(state): Extension<Arc<State>>) -> Response {
+  state
+    .git
+    .clone()
+    .history_listing_handler(&page, state)
+    .await
+    .into_response()
+}
+
+pub mod edit_handler {
+  use super::*;
+
+  pub async fn get(page: Page, Extension(state): Extension<Arc<State>>) -> Response {
+    page.edit_handler(state).await.into_response()
+  }
+
+  pub async fn post(
+    page: Page,
+    body: String,
+    user: User,
+    Extension(state): Extension<Arc<State>>,
+  ) -> Response {
+    match page.update(body, &user, state).await {
+      Ok(_) => Redirect::to(&page.url_path()).into_response(),
+      Err(err) => err.into_response(),
+    }
+  }
+}
+
+pub mod new_handler {
+  use super::*;
+
+  pub async fn get(
+    Path(path): Path<String>,
+    user: Option<User>,
+    Extension(state): Extension<Arc<State>>,
+  ) -> Result<Response, Error> {
+    let path = path.strip_prefix("/").unwrap();
+
+    match find_file(&path, &state.config) {
+      Ok(path) => return Ok(Redirect::to(&format!("/{}", path.display())).into_response()),
+      Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
+      Err(err) => return Err(Error::from(err)),
+    };
+
+    let mut context = tera::Context::new();
+    context.insert("path", path);
+    context.insert("user", &user);
+    context.insert("supported_formats", &crate::pandoc::VALID_FORMATS_WITH_NAME);
+
+    let html = tokio::task::spawn_blocking(move || {
+      let tera = state.tera.lock().unwrap();
+
+      let rendered = tera.render("new.html", &context)?;
+
+      Ok::<_, crate::page::Error>(rendered)
+    })
+    .await
+    .unwrap()
+    .map(|html| Html(html));
+
+    Ok(html.into_response())
+  }
+
+  #[derive(serde::Deserialize)]
+  pub struct NewPage {
+    body: String,
+    format: Format,
+  }
+
+  pub async fn post(
+    Path(url_path): Path<String>,
+    Json(new_page): Json<NewPage>,
+    user: User,
+    Extension(state): Extension<Arc<State>>,
+  ) -> Result<Response, Error> {
+    let path = url_path.strip_prefix("/").unwrap();
+    let path = PathBuf::from(path);
+
+    let filepath =
+      dbg!(state.config.pages_directory.join(&path)).with_extension(new_page.format.extension());
+
+    let page = Page {
+      path,
+      filepath,
+      format: Some(new_page.format),
+      user: Some(user.clone()),
+    };
+
+    page.create(new_page.body, &user, state).await?;
+
+    Ok(Redirect::to(&page.url_path()).into_response())
+  }
+}
+
+pub async fn raw_handler(page: Page) -> Response {
+  page.raw().await.into_response()
+}
+
 pub struct PageRender {
   html: String,
   context: tera::Context,
@@ -278,7 +380,7 @@ pub enum PagePathError {
 }
 
 impl IntoResponse for PagePathError {
-  fn into_response(self) -> axum::response::Response {
+  fn into_response(self) -> Response {
     let code = match self {
       Self::PathRejection(_) => StatusCode::NOT_FOUND,
       Self::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,

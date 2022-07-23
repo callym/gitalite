@@ -1,5 +1,10 @@
 use std::sync::Arc;
 
+use axum::{
+  extract::Query,
+  response::{Html, IntoResponse, Response},
+  Extension,
+};
 use pandoc::{InputKind, OutputFormat, OutputKind, Pandoc, PandocOption, PandocOutput};
 use pandoc_ast::MutVisitor;
 use serde::{Deserialize, Deserializer};
@@ -251,4 +256,22 @@ impl pandoc_ast::MutVisitor for KatexFilter {
       *inline = pandoc_ast::Inline::RawInline(pandoc_ast::Format(String::from("html")), html);
     }
   }
+}
+
+pub async fn render_handler(
+  body: String,
+  format: Option<Query<QueryFormat>>,
+  Extension(state): Extension<Arc<State>>,
+) -> Result<Response, crate::page::Error> {
+  let format = format.map(|query| query.0);
+
+  let html = tokio::task::spawn_blocking(move || {
+    let rendered = to_html(body, format.map(|f| f.into()), state)?;
+
+    Ok::<_, crate::page::Error>(Html(rendered))
+  })
+  .await
+  .unwrap()?;
+
+  Ok(html.into_response())
 }

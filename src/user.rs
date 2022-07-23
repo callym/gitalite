@@ -32,7 +32,6 @@ impl From<cocoon::Error> for Error {
   }
 }
 
-
 #[derive(Serialize, Deserialize, Clone, Debug, Hash, PartialEq, Eq)]
 pub struct UserKey(String);
 
