@@ -15,13 +15,12 @@ use axum::{
   Router,
 };
 use git::Git;
-use page::Page;
+use page::{Page, PagePathError};
 use tera::{Context, Tera};
 use user::UserDb;
 
 use crate::{
   config::{Args, Config},
-  error::Error,
   pandoc::{Format, QueryFormat},
   user::User,
 };
@@ -29,7 +28,6 @@ use crate::{
 mod auth;
 mod config;
 mod context;
-mod error;
 mod git;
 mod page;
 mod pandoc;
@@ -91,9 +89,9 @@ async fn main() -> Result<(), eyre::Report> {
   let app = Router::new()
     .route(
       "/meta/login",
-      get(|state| auth::login_handler(state)).post({
+      get(|state| auth::login_handler(state)).post(
         move |body, jar, store, state| auth::authenticate_handler(body, jar, store, state)
-      }),
+      ),
     )
     .route(
       "/meta/login-callback",
@@ -110,16 +108,16 @@ async fn main() -> Result<(), eyre::Report> {
     )
     .route(
       "/meta/history/*path",
-      get(|path, user, state| history(path, user, state)),
+      get(|page, state| history(page, state)),
     )
     .route(
       "/meta/edit/*path",
-      get(|path, user, state| edit(path, user, state))
-        .post(|body, path, user, state| save(path, body, user, state)),
+      get(|page, state| edit(page, state))
+        .post(|body, page, user, state| save(page, body, user, state)),
     )
     .route(
       "/meta/raw/*path",
-      get(|path, user, state| raw(path, user, state)),
+      get(|page| raw(page)),
     )
     .route(
       "/meta/render",
@@ -139,7 +137,7 @@ async fn main() -> Result<(), eyre::Report> {
   Ok(())
 }
 
-async fn static_handler(path: &std::path::Path, _: &State) -> Result<impl IntoResponse, Error> {
+async fn static_handler(path: &std::path::Path, _: &State) -> Result<impl IntoResponse, crate::page::Error> {
   let mime = mime_guess::from_path(path).first_or_text_plain();
 
   let file = tokio::fs::read(path).await?;
@@ -158,17 +156,16 @@ struct RouteQuery {
 async fn route<T: Send>(request: Request<T>) -> Response {
   let path = request.uri().path();
   let path = path.strip_prefix("/").unwrap();
-  let path = match dbg!(urlencoding::decode(path)) {
+  let path = match urlencoding::decode(path) {
     Ok(path) => path.to_string(),
-    Err(err) => return Err::<(), _>(Error::Utf8(err)).into_response(),
+    Err(err) => return Err::<(), _>(crate::page::Error::Utf8(err)).into_response(),
   };
-  let path = dbg!(PathBuf::from(path));
+  let path = PathBuf::from(path);
 
   let query = request.uri().query().unwrap_or("");
   let query = serde_qs::from_str::<RouteQuery>(query).unwrap();
 
   let mut parts = RequestParts::new(request);
-  let user = Option::<User>::from_request(&mut parts).await.unwrap();
 
   let Extension(state) = Extension::<Arc<State>>::from_request(&mut parts)
     .await
@@ -179,28 +176,14 @@ async fn route<T: Send>(request: Request<T>) -> Response {
     return static_handler(&static_path, &state).await.into_response();
   }
 
-  let page_path = state.config.pages_directory.join(&path);
-  let filepath = match find_file(page_path) {
-    Ok(path) => path,
-    Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+  let page = match Page::from_request(&mut parts).await {
+    Ok(page) => page,
+    Err(PagePathError::Io(err)) if err.kind() == std::io::ErrorKind::NotFound => {
       return Redirect::to(&format!("/meta/new/{}", path.display())).into_response();
     },
-    Err(err) => return Error::from(err).into_response(),
+    Err(err) => return err.into_response(),
   };
 
-  let format = filepath
-    .extension()
-    .map(|e| e.to_str())
-    .flatten()
-    .map(|ext| Format::from_extension(ext))
-    .flatten();
-
-  let page = Page {
-    path,
-    filepath,
-    format,
-    user,
-  };
 
   if let Some(revision) = query.revision {
     return state
@@ -214,36 +197,7 @@ async fn route<T: Send>(request: Request<T>) -> Response {
   return page.view_handler(state.clone()).await.into_response();
 }
 
-async fn history(
-  Path(path): Path<String>,
-  user: Option<User>,
-  Extension(state): Extension<Arc<State>>,
-) -> Response {
-  let path = path.strip_prefix("/").unwrap();
-  let path = PathBuf::from(path);
-
-  let dir = std::env::current_dir().unwrap();
-  let page_path = dbg!(dir.join(&state.config.pages_directory).join(&path));
-
-  let filepath = match find_file(page_path) {
-    Ok(path) => path,
-    Err(err) => return Error::from(err).into_response(),
-  };
-
-  let format = filepath
-    .extension()
-    .map(|e| e.to_str())
-    .flatten()
-    .map(|ext| Format::from_extension(ext))
-    .flatten();
-
-  let page = Page {
-    path,
-    filepath,
-    format,
-    user,
-  };
-
+async fn history(page: Page, Extension(state): Extension<Arc<State>>) -> Response {
   state
     .git
     .clone()
@@ -252,73 +206,19 @@ async fn history(
     .into_response()
 }
 
-async fn edit(
-  Path(path): Path<String>,
-  user: Option<User>,
-  Extension(state): Extension<Arc<State>>,
-) -> Response {
-  let path = path.strip_prefix("/").unwrap();
-  let path = PathBuf::from(path);
-
-  let dir = std::env::current_dir().unwrap();
-  let page_path = dbg!(dir.join(&state.config.pages_directory).join(&path));
-
-  let filepath = match find_file(page_path) {
-    Ok(path) => path,
-    Err(err) => return Error::from(err).into_response(),
-  };
-
-  let format = filepath
-    .extension()
-    .map(|e| e.to_str())
-    .flatten()
-    .map(|ext| Format::from_extension(ext))
-    .flatten();
-
-  let page = Page {
-    path,
-    filepath,
-    format,
-    user,
-  };
-
+async fn edit(page: Page, Extension(state): Extension<Arc<State>>) -> Response {
   page.edit_handler(state).await.into_response()
 }
 
 async fn save(
-  Path(url_path): Path<String>,
+  page: Page,
   body: String,
   user: User,
   Extension(state): Extension<Arc<State>>,
 ) -> Response {
-  let path = url_path.strip_prefix("/").unwrap();
-  let path = PathBuf::from(path);
-
-  let dir = std::env::current_dir().unwrap();
-  let page_path = dbg!(dir.join(&state.config.pages_directory).join(&path));
-
-  let filepath = match find_file(page_path) {
-    Ok(path) => path,
-    Err(err) => return Error::from(err).into_response(),
-  };
-
-  let format = filepath
-    .extension()
-    .map(|e| e.to_str())
-    .flatten()
-    .map(|ext| Format::from_extension(ext))
-    .flatten();
-
-  let page = Page {
-    path,
-    filepath,
-    format,
-    user: Some(user.clone()),
-  };
-
   match page.update(body, &user, state).await {
-    Ok(_) => Redirect::to(&url_path).into_response(),
-    Err(err) => Error::from(err).into_response(),
+    Ok(_) => Redirect::to(&page.url_path()).into_response(),
+    Err(err) => err.into_response(),
   }
 }
 
@@ -329,13 +229,10 @@ async fn get_new(
 ) -> Response {
   let path = path.strip_prefix("/").unwrap();
 
-  let dir = std::env::current_dir().unwrap();
-  let page_path = dbg!(dir.join(&state.config.pages_directory).join(&path));
-
-  match find_file(page_path) {
+  match page::find_file(&path, &state.config) {
     Ok(path) => return Redirect::to(&format!("/{}", path.display())).into_response(),
     Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
-    Err(err) => return Error::from(err).into_response(),
+    Err(err) => return crate::page::Error::from(err).into_response(),
   };
 
   let mut context = Context::new();
@@ -348,7 +245,7 @@ async fn get_new(
 
     let rendered = tera.render("new.html", &context)?;
 
-    Ok::<_, Error>(rendered)
+    Ok::<_, crate::page::Error>(rendered)
   })
   .await
   .unwrap()
@@ -371,8 +268,7 @@ async fn new(
   let path = url_path.strip_prefix("/").unwrap();
   let path = PathBuf::from(path);
 
-  let dir = std::env::current_dir().unwrap();
-  let filepath = dbg!(dir.join(&state.config.pages_directory).join(&path))
+  let filepath = dbg!(state.config.pages_directory.join(&path))
     .with_extension(new_page.format.extension());
 
   let page = Page {
@@ -384,40 +280,11 @@ async fn new(
 
   match page.create(new_page.body, &user, state).await {
     Ok(_) => Redirect::to(&url_path).into_response(),
-    Err(err) => Error::from(err).into_response(),
+    Err(err) => err.into_response(),
   }
 }
 
-async fn raw(
-  Path(path): Path<String>,
-  user: Option<User>,
-  Extension(state): Extension<Arc<State>>,
-) -> Response {
-  let path = path.strip_prefix("/").unwrap();
-  let path = PathBuf::from(path);
-
-  let dir = std::env::current_dir().unwrap();
-  let page_path = dbg!(dir.join(&state.config.pages_directory).join(&path));
-
-  let filepath = match find_file(page_path) {
-    Ok(path) => path,
-    Err(err) => return Error::from(err).into_response(),
-  };
-
-  let format = filepath
-    .extension()
-    .map(|e| e.to_str())
-    .flatten()
-    .map(|ext| Format::from_extension(ext))
-    .flatten();
-
-  let page = Page {
-    path,
-    filepath,
-    format,
-    user,
-  };
-
+async fn raw(page: Page) -> Response {
   page.raw().await.into_response()
 }
 
@@ -431,47 +298,9 @@ async fn render(
   tokio::task::spawn_blocking(move || {
     let rendered = crate::pandoc::to_html(body, format.map(|f| f.into()), state)?;
 
-    Ok::<_, Error>(Html(rendered))
+    Ok::<_, crate::page::Error>(Html(rendered))
   })
   .await
   .unwrap()
   .into_response()
-}
-
-fn find_file(mut path: PathBuf) -> Result<PathBuf, std::io::Error> {
-  if path.is_dir() {
-    return Err(std::io::Error::new(
-      std::io::ErrorKind::NotFound,
-      format!("{:?} is a directory", &path),
-    ));
-  }
-
-  let name_to_match = path
-    .file_stem()
-    .ok_or(std::io::Error::new(
-      std::io::ErrorKind::NotFound,
-      format!("{:?} has no filename", &path),
-    ))?
-    .to_os_string();
-
-  path.pop();
-
-  for file in std::fs::read_dir(&path)? {
-    let file = file?;
-    let path = file.path();
-
-    let name = match path.file_stem() {
-      Some(name) => name,
-      None => continue,
-    };
-
-    if name_to_match == name {
-      return Ok(file.path());
-    }
-  }
-
-  return Err(std::io::Error::new(
-    std::io::ErrorKind::NotFound,
-    format!("{:?} not found", &path),
-  ));
 }

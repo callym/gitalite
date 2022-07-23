@@ -1,9 +1,41 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{path::PathBuf, string::FromUtf8Error, sync::Arc};
 
-use axum::response::{Html, IntoResponse};
+use axum::{
+  async_trait,
+  extract::{rejection::PathRejection, FromRequest, RequestParts},
+  http::StatusCode,
+  response::{Html, IntoResponse},
+  Extension,
+};
 use extract_frontmatter::{config::Splitter, Extractor};
 
-use crate::{config::Config, context::Context, error::Error, pandoc::Format, user::User, State};
+use crate::{config::Config, context::Context, pandoc::Format, user::User, State};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+  #[error(transparent)]
+  TeraError(#[from] tera::Error),
+  #[error(transparent)]
+  MakeRelativeError(#[from] std::path::StripPrefixError),
+  #[error(transparent)]
+  Io(#[from] tokio::io::Error),
+  #[error(transparent)]
+  FrontMatterError(#[from] toml::de::Error),
+  #[error(transparent)]
+  Git(#[from] crate::git::Error),
+  #[error(transparent)]
+  Pandoc(#[from] crate::pandoc::Error),
+  #[error(transparent)]
+  User(#[from] crate::user::Error),
+  #[error(transparent)]
+  Utf8(#[from] FromUtf8Error),
+}
+
+impl IntoResponse for Error {
+  fn into_response(self) -> axum::response::Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+  }
+}
 
 pub struct Page {
   pub path: PathBuf,
@@ -40,6 +72,12 @@ impl Page {
     let path = self.filepath.strip_prefix(&config.pages_directory)?;
 
     Ok(path.to_path_buf())
+  }
+
+  pub fn url_path(&self) -> String {
+    let path = self.path.with_extension("");
+
+    format!("/{}", path.display())
   }
 
   pub async fn raw(&self) -> Result<String, Error> {
@@ -160,7 +198,7 @@ impl Page {
     })
   }
 
-  pub async fn view_handler(&self, state: Arc<State>) -> Result<impl IntoResponse, Error> {
+  pub async fn view_handler(&self, state: Arc<State>) -> Result<Html<String>, Error> {
     let mime = mime_guess::from_path(&self.path).first_or_text_plain();
 
     log::info!("{:?}: {:?}", self.path, mime.essence_str());
@@ -180,7 +218,7 @@ impl Page {
     Ok(Html(html))
   }
 
-  pub async fn edit_handler(&self, state: Arc<State>) -> Result<impl IntoResponse, Error> {
+  pub async fn edit_handler(&self, state: Arc<State>) -> Result<Html<String>, Error> {
     {
       let mut tera = state.tera.lock().unwrap();
       tera.full_reload()?;
@@ -202,10 +240,6 @@ impl Page {
     })
     .await
     .unwrap()
-  }
-
-  pub async fn update_handler(&self, content: String, state: Arc<State>) -> Result<(), Error> {
-    unimplemented!()
   }
 }
 
@@ -233,4 +267,107 @@ impl PageRender {
     .await
     .unwrap()
   }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PagePathError {
+  #[error(transparent)]
+  PathRejection(#[from] PathRejection),
+  #[error(transparent)]
+  Io(#[from] std::io::Error),
+}
+
+impl IntoResponse for PagePathError {
+  fn into_response(self) -> axum::response::Response {
+    let code = match self {
+      Self::PathRejection(_) => StatusCode::NOT_FOUND,
+      Self::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+
+    (code, self.to_string()).into_response()
+  }
+}
+
+#[async_trait]
+impl<B> FromRequest<B> for Page
+where
+  B: Send,
+{
+  type Rejection = PagePathError;
+
+  async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
+    let Extension(state) = Extension::<Arc<State>>::from_request(req)
+      .await
+      .expect("`State` extension missing");
+
+    let path = axum::extract::Path::<String>::from_request(req).await?;
+    let path = path.0;
+
+    let path = path.strip_prefix("/").unwrap();
+    let path = PathBuf::from(path);
+
+    let filepath = find_file(&path, &state.config)?;
+
+    let format = filepath
+      .extension()
+      .map(|e| e.to_str())
+      .flatten()
+      .map(|ext| Format::from_extension(ext))
+      .flatten();
+
+    // We're good to unwrap here because if there's an error, it'll just return `None`.
+    let user = Option::<User>::from_request(req).await.unwrap();
+
+    let page = Page {
+      path,
+      filepath,
+      format,
+      user,
+    };
+
+    Ok(page)
+  }
+}
+
+pub fn find_file(
+  path: impl AsRef<std::path::Path>,
+  config: &Config,
+) -> Result<PathBuf, std::io::Error> {
+  let mut path = config.pages_directory.join(&path);
+
+  if path.is_dir() {
+    return Err(std::io::Error::new(
+      std::io::ErrorKind::NotFound,
+      format!("{:?} is a directory", &path),
+    ));
+  }
+
+  let name_to_match = path
+    .file_stem()
+    .ok_or(std::io::Error::new(
+      std::io::ErrorKind::NotFound,
+      format!("{:?} has no filename", &path),
+    ))?
+    .to_os_string();
+
+  path.pop();
+
+  for file in std::fs::read_dir(&path)? {
+    let file = file?;
+    let path = file.path();
+
+    let name = match path.file_stem() {
+      Some(name) => name,
+      None => continue,
+    };
+
+    if name_to_match == name {
+      return Ok(file.path());
+    }
+  }
+
+  return Err(std::io::Error::new(
+    std::io::ErrorKind::NotFound,
+    format!("{:?} not found", &path),
+  ));
 }

@@ -1,4 +1,4 @@
-use std::{str::FromStr, sync::Arc};
+use std::{str::FromStr, string::FromUtf8Error, sync::Arc};
 
 use async_session::{Session, SessionStore};
 use async_sqlx_session::PostgresSessionStore;
@@ -6,6 +6,7 @@ use axum::{
   async_trait,
   extract::{Extension, FromRequest, Query, RequestParts, TypedHeader},
   headers::Cookie,
+  http::StatusCode,
   response::{Html, IntoResponse, Redirect},
   Form,
 };
@@ -16,10 +17,45 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
   config::Config,
-  error::Error,
   user::{User, UserKey},
   State,
 };
+
+#[derive(thiserror::Error, Debug)]
+pub enum Error {
+  #[error(transparent)]
+  TeraError(#[from] tera::Error),
+  #[error(transparent)]
+  Session(#[from] async_session::Error),
+  #[error(transparent)]
+  Utf8(#[from] FromUtf8Error),
+  #[error("No authorization endpoint found")]
+  MissingAuthEndpoint,
+  #[error("No token endpoint found")]
+  MissingTokenEndpoint,
+  #[error(transparent)]
+  IndieWebError(#[from] indieweb::Error),
+  #[error(transparent)]
+  SerdeJson(#[from] serde_json::Error),
+  #[error("Missing field {0} from profile")]
+  MissingField(&'static str),
+  #[error(transparent)]
+  User(#[from] crate::user::Error),
+}
+
+impl IntoResponse for Error {
+  fn into_response(self) -> axum::response::Response {
+    let code = match self {
+      Self::Utf8(_) => StatusCode::BAD_REQUEST,
+      Self::MissingAuthEndpoint => StatusCode::BAD_REQUEST,
+      Self::MissingTokenEndpoint => StatusCode::BAD_REQUEST,
+      Self::MissingField(_) => StatusCode::BAD_REQUEST,
+      _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+
+    (code, self.to_string()).into_response()
+  }
+}
 
 #[derive(Debug, serde::Deserialize)]
 pub struct Params {
@@ -29,7 +65,7 @@ pub struct Params {
 
 pub async fn login_handler(
   Extension(state): Extension<Arc<State>>,
-) -> Result<impl IntoResponse, Error> {
+) -> Result<impl IntoResponse, crate::page::Error> {
   {
     let mut tera = state.tera.lock().unwrap();
     tera.full_reload()?;
@@ -42,7 +78,7 @@ pub async fn login_handler(
 
     let rendered = tera.render("login.html", &context)?;
 
-    Ok::<_, Error>(rendered)
+    Ok::<_, crate::page::Error>(rendered)
   })
   .await
   .unwrap()?;
@@ -353,12 +389,35 @@ pub async fn authenticate_callback(
   Ok(user)
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum UserExtractError {
+  #[error(transparent)]
+  UserKey(#[from] crate::user::UserKeyError),
+  #[error("No user cookie found")]
+  UserCookie,
+  #[error(transparent)]
+  Utf8(#[from] FromUtf8Error),
+  #[error("Unauthorised")]
+  Unauthorised,
+}
+
+impl IntoResponse for UserExtractError {
+  fn into_response(self) -> axum::response::Response {
+    let code = match self {
+      Self::Unauthorised => StatusCode::UNAUTHORIZED,
+      _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+
+    (code, self.to_string()).into_response()
+  }
+}
+
 #[async_trait]
 impl<B> FromRequest<B> for User
 where
   B: Send,
 {
-  type Rejection = Error;
+  type Rejection = UserExtractError;
 
   async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
     let Extension(store) = Extension::<PostgresSessionStore>::from_request(req)
@@ -375,7 +434,7 @@ where
     let session_cookie = cookie
       .as_ref()
       .and_then(|cookie| cookie.get(SESSION_COOKIE_NAME))
-      .ok_or(Error::UserCookie)?;
+      .ok_or(UserExtractError::UserCookie)?;
     let session_cookie = urlencoding::decode(session_cookie)?;
 
     log::info!("{}", session_cookie);
@@ -391,7 +450,7 @@ where
     let users = state.users.lock().unwrap();
     users
       .get(&UserKey::from_session(&session)?)
-      .ok_or(Error::Unauthorised)
+      .ok_or(UserExtractError::Unauthorised)
       .cloned()
   }
 }

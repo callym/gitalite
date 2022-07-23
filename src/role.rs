@@ -3,15 +3,29 @@ use std::sync::Arc;
 use axum::{
   async_trait,
   extract::{FromRequest, RequestParts},
+  http::StatusCode,
+  response::IntoResponse,
 };
 use serde::{Deserialize, Serialize};
 use tera::{helpers::tests::number_args_allowed, Value};
 
-use crate::{error::Error, user::User, State};
+use crate::{auth::UserExtractError, user::User, State};
 
 #[derive(Serialize, Deserialize, PartialEq, Eq, Copy, Clone, Debug)]
 pub enum Role {
   Administrator,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+  #[error(transparent)]
+  UserExtract(#[from] UserExtractError),
+}
+
+impl IntoResponse for Error {
+  fn into_response(self) -> axum::response::Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+  }
 }
 
 pub struct Is<const ROLE: Role>;

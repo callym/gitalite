@@ -6,16 +6,32 @@ use std::{
 };
 
 use async_session::Session;
-use axum::{
-  extract::Extension,
-  response::{Html, IntoResponse, Response},
-};
+use axum::{extract::Extension, response::Html};
 use cocoon::Cocoon;
 use oauth2::url::Url;
 use serde::{Deserialize, Serialize};
 use tera::Context;
 
-use crate::{config::Config, error::Error, role::Role, State};
+use crate::{config::Config, role::Role, State};
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+  #[error(transparent)]
+  Io(#[from] tokio::io::Error),
+  #[error(transparent)]
+  Ron(#[from] ron::Error),
+  #[error("Cocoon error: {0:#?}")]
+  Cocoon(cocoon::Error),
+  #[error(transparent)]
+  TeraError(#[from] tera::Error),
+}
+
+impl From<cocoon::Error> for Error {
+  fn from(err: cocoon::Error) -> Self {
+    Error::Cocoon(err)
+  }
+}
+
 
 #[derive(Serialize, Deserialize, Clone, Debug, Hash, PartialEq, Eq)]
 pub struct UserKey(String);
@@ -50,9 +66,13 @@ impl From<String> for UserKey {
   }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("Session doesn't contain `data` key.")]
+pub struct UserKeyError;
+
 impl UserKey {
-  pub fn from_session(session: &Session) -> Result<Self, Error> {
-    let data = session.get("data").ok_or(Error::MissingSession)?;
+  pub fn from_session(session: &Session) -> Result<Self, UserKeyError> {
+    let data = session.get("data").ok_or(UserKeyError)?;
 
     Ok(data)
   }
@@ -149,7 +169,7 @@ pub async fn profile_handler(
   axum::extract::Path(user_key): axum::extract::Path<UserKey>,
   user: Option<User>,
   Extension(state): Extension<Arc<State>>,
-) -> Response {
+) -> Result<Html<String>, crate::page::Error> {
   {
     let mut tera = state.tera.lock().unwrap();
     tera.full_reload().unwrap();
@@ -164,7 +184,7 @@ pub async fn profile_handler(
   context.insert("user", &user);
   context.insert("profile", &profile);
 
-  tokio::task::spawn_blocking(move || {
+  let html = tokio::task::spawn_blocking(move || {
     let recent_commits = state.git.user_history(&profile.key(), Some(10), &state)?;
     context.insert("recent_commits", &recent_commits);
 
@@ -172,10 +192,11 @@ pub async fn profile_handler(
 
     let rendered = tera.render("profile.html", &context)?;
 
-    Ok::<_, Error>(rendered)
+    Ok::<_, crate::page::Error>(rendered)
   })
   .await
   .unwrap()
-  .map(|html| Html(html))
-  .into_response()
+  .map(|html| Html(html))?;
+
+  Ok(html)
 }

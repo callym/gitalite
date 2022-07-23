@@ -4,7 +4,17 @@ use pandoc::{InputKind, OutputFormat, OutputKind, Pandoc, PandocOption, PandocOu
 use pandoc_ast::MutVisitor;
 use serde::{Deserialize, Deserializer};
 
-use crate::{error::Error, State};
+use crate::State;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+  #[error(transparent)]
+  PandocError(#[from] pandoc::PandocError),
+  #[error(transparent)]
+  TeraError(#[from] tera::Error),
+  #[error("Output from Pandoc is wrong\nExpected:\n{expected}\n\n\nActual:\n{actual}")]
+  PandocWrongOutput { expected: String, actual: String },
+}
 
 pub const VALID_FORMATS_WITH_NAME: [(&'static str, &'static str); 14] = [
   ("markdown", "Markdown"),

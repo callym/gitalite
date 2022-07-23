@@ -1,10 +1,14 @@
 use std::{
   ops::Deref,
   path::{Path, PathBuf},
+  string::FromUtf8Error,
   sync::{Arc, Mutex},
 };
 
-use axum::response::{Html, IntoResponse};
+use axum::{
+  http::StatusCode,
+  response::{Html, IntoResponse},
+};
 use git2::{
   Cred,
   ErrorClass as Class,
@@ -17,11 +21,26 @@ use git2::{
 
 use crate::{
   config::Config,
-  error::Error,
   page::Page,
   user::{User, UserDb, UserKey},
   State,
 };
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+  #[error(transparent)]
+  Git(#[from] git2::Error),
+  #[error(transparent)]
+  Utf8(#[from] FromUtf8Error),
+  #[error(transparent)]
+  TeraError(#[from] tera::Error),
+}
+
+impl IntoResponse for Error {
+  fn into_response(self) -> axum::response::Response {
+    (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+  }
+}
 
 pub struct Git {
   repository: Arc<Mutex<Repository>>,
@@ -333,8 +352,8 @@ impl Git {
     page: &Page,
     revision: String,
     state: Arc<State>,
-  ) -> Result<impl IntoResponse, Error> {
-    let oid = git2::Oid::from_str(&revision)?;
+  ) -> Result<Html<String>, crate::page::Error> {
+    let oid = git2::Oid::from_str(&revision).map_err(Error::Git)?;
     let file = state.git.get_file(&page.filepath, oid)?;
 
     let mut renderer = page.renderer_with(&file, state).await?;
@@ -349,7 +368,7 @@ impl Git {
     self: Arc<Self>,
     page: &Page,
     state: Arc<State>,
-  ) -> Result<impl IntoResponse, Error> {
+  ) -> Result<Html<String>, crate::page::Error> {
     {
       let mut tera = state.tera.lock().unwrap();
       tera.full_reload()?;
@@ -372,7 +391,7 @@ impl Git {
 
       let rendered = tera.render("history.html", &context)?;
 
-      Ok::<_, Error>(rendered)
+      Ok::<_, crate::page::Error>(rendered)
     })
     .await
     .unwrap()?;

@@ -6,8 +6,6 @@ use std::{
 
 use oauth2::url::Url;
 
-use crate::error::Error;
-
 #[derive(clap::Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
 pub struct Args {
@@ -58,7 +56,7 @@ pub struct Config {
 }
 
 impl Config {
-  pub fn canonicalize(&mut self) -> Result<(), Error> {
+  pub fn canonicalize(&mut self) -> Result<(), std::io::Error> {
     self.pages_directory = self.pages_directory.canonicalize()?;
     self.static_directory = self.static_directory.canonicalize()?;
     self.templates_directory = self.templates_directory.canonicalize()?;
