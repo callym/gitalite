@@ -20,15 +20,22 @@ pub enum Role {
 pub enum Error {
   #[error(transparent)]
   UserExtract(#[from] UserExtractError),
+  #[error("Unauthorised: User is not '{0:?}'")]
+  Unauthorised(Role),
 }
 
 impl IntoResponse for Error {
   fn into_response(self) -> axum::response::Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+    let code = match self {
+      Self::Unauthorised(_) => StatusCode::UNAUTHORIZED,
+      _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+
+    (code, self.to_string()).into_response()
   }
 }
 
-pub struct Is<const ROLE: Role>;
+pub struct Is<const ROLE: Role>(User);
 
 #[async_trait]
 impl<const ROLE: Role, B> FromRequest<B> for Is<ROLE>
@@ -41,10 +48,10 @@ where
     let user = User::from_request(req).await?;
 
     if user.roles.contains(&ROLE) {
-      return Ok(Self);
+      return Ok(Self(user));
     }
 
-    unimplemented!()
+    Err(Error::Unauthorised(ROLE))
   }
 }
 
