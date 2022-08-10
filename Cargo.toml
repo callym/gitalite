@@ -16,7 +16,7 @@ cocoon = "0.3.1"
 color-eyre = "0.6"
 extract-frontmatter = "4.1"
 eyre = "0.6"
-git2 = "0.14"
+git2 = { version = "0.15", features = ["vendored-libgit2", "vendored-openssl"] }
 indieweb = "0.1"
 katex = "0.4"
 log = "0.4"
