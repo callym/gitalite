@@ -3,7 +3,6 @@
 use std::sync::{Arc, Mutex};
 
 use axum::{
-  response::{IntoResponse, Response},
   routing::{get, post},
   Extension,
   Router,
@@ -13,7 +12,6 @@ use tera::Tera;
 use crate::{
   config::{Args, Config},
   git::Git,
-  role::{Is, Role},
   user::UserDb,
 };
 

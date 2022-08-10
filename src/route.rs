@@ -4,7 +4,6 @@ use axum::{
   extract::{FromRequest, RequestParts},
   http::{header, Request},
   response::{IntoResponse, Redirect, Response},
-  Extension,
 };
 
 use crate::{
@@ -26,16 +25,18 @@ pub async fn route<T: Send>(request: Request<T>) -> Result<Response, crate::page
   let query = request.uri().query().unwrap_or("");
   let query = serde_qs::from_str::<RouteQuery>(query).unwrap();
 
-  let mut parts = RequestParts::new(request);
-
-  let Extension(state) = Extension::<Arc<State>>::from_request(&mut parts)
-    .await
-    .expect("`State` extension missing");
+  let state = request
+    .extensions()
+    .get::<Arc<State>>()
+    .expect("`State` extension missing")
+    .clone();
 
   let static_path = state.config.static_directory.join(&path);
   if static_path.is_file() {
     return static_handler(&static_path).await;
   }
+
+  let mut parts = RequestParts::new(request);
 
   let page = match Page::from_request(&mut parts).await {
     Ok(page) => page,

@@ -444,8 +444,9 @@ where
     let session = store
       .load_session(session_cookie.to_string())
       .await
-      .unwrap()
-      .unwrap();
+      .ok()
+      .flatten()
+      .ok_or(UserExtractError::Unauthorised)?;
 
     let users = state.users.lock().unwrap();
     users

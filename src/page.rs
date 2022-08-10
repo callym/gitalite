@@ -398,13 +398,13 @@ where
   type Rejection = PagePathError;
 
   async fn from_request(req: &mut RequestParts<B>) -> Result<Self, Self::Rejection> {
-    let Extension(state) = Extension::<Arc<State>>::from_request(req)
-      .await
-      .expect("`State` extension missing");
+    let state = req
+      .extensions()
+      .get::<Arc<State>>()
+      .expect("`State` extension missing")
+      .clone();
 
-    let path = axum::extract::Path::<String>::from_request(req).await?;
-    let path = path.0;
-
+    let path = req.uri().path();
     let path = path.strip_prefix("/").unwrap();
     let path = PathBuf::from(path);
 
