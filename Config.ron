@@ -27,7 +27,7 @@
   // Additional macros that you want to support in KaTeX.
   katex_macros: {},
   // The URL for the Postgres database that holds the user session data.
-  postgresql: "postgres://postgres:postgres@localhost:5432/postgres",
+  postgresql: "postgres://postgres:postgres@postgres:5432/postgres",
   // Authenticated/authorised users are stored in a simple "database" file.
   users: (
     // When starting up the server, if this database doesn't exist, it'll be
