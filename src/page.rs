@@ -1,4 +1,4 @@
-use std::{path::PathBuf, string::FromUtf8Error, sync::Arc};
+use std::{collections::HashSet, path::PathBuf, string::FromUtf8Error, sync::Arc};
 
 use axum::{
   async_trait,
@@ -9,8 +9,16 @@ use axum::{
   Json,
 };
 use extract_frontmatter::{config::Splitter, Extractor};
+use walkdir::WalkDir;
 
-use crate::{config::Config, context::Context, pandoc::Format, user::User, State};
+use crate::{
+  config::Config,
+  context::Context,
+  front_matter::FrontMatter,
+  pandoc::Format,
+  user::User,
+  State,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -64,13 +72,53 @@ impl PageContext {
   }
 }
 
-#[derive(serde::Deserialize, Debug)]
-pub struct FrontMatter {
-  pub title: Option<String>,
-  pub categories: Option<Vec<String>>,
-}
-
 impl Page {
+  pub fn all(config: &Config) -> impl Iterator<Item = Self> {
+    WalkDir::new(&config.pages_directory)
+      .into_iter()
+      .filter_map(|e| {
+        let e = e.ok()?;
+
+        if !e.file_type().is_file() {
+          return None;
+        }
+
+        let path = e.path().with_extension("");
+        let filepath = e.path().to_path_buf();
+
+        let format = e
+          .path()
+          .extension()
+          .map(|ext| Format::from_extension(&ext.to_string_lossy()))
+          .flatten();
+
+        match format {
+          Some(format) => Some(Self {
+            path,
+            filepath,
+            format: Some(format),
+            user: None,
+          }),
+          None => None,
+        }
+      })
+  }
+
+  pub async fn categories(config: &Config) -> Result<HashSet<String>, Error> {
+    let mut categories = HashSet::new();
+
+    for page in Self::all(config) {
+      let file = page.raw().await?;
+      let (front_matter, _) = page.front_matter(&file)?;
+
+      if let Some(cat) = front_matter.categories {
+        categories.extend(cat);
+      }
+    }
+
+    Ok(categories)
+  }
+
   pub fn relative_path(&self, config: &Config) -> Result<PathBuf, Error> {
     let path = self.filepath.strip_prefix(&config.pages_directory)?;
 
@@ -95,10 +143,21 @@ impl Page {
     Ok(self.context_with(&file)?)
   }
 
+  pub fn front_matter(&self, file: &str) -> Result<(FrontMatter, String), Error> {
+    if file.starts_with(FrontMatter::DELIMITER) {
+      let (front_matter, data) =
+        Extractor::new(Splitter::EnclosingLines(FrontMatter::DELIMITER)).extract(file);
+      let data = data.to_string();
+      let front_matter = toml::from_str(&front_matter)?;
+
+      Ok((front_matter, data))
+    } else {
+      Ok((FrontMatter::default(), file.to_string()))
+    }
+  }
+
   pub fn context_with(&self, file: &str) -> Result<(PageContext, String), Error> {
-    let (data, front_matter) = Extractor::new(Splitter::DelimiterLine("---")).extract(file);
-    let data = data.to_string();
-    let front_matter: FrontMatter = toml::from_str(&front_matter)?;
+    let (front_matter, data) = self.front_matter(file)?;
 
     Ok((
       PageContext {
@@ -343,6 +402,35 @@ pub mod new_handler {
 
 pub async fn raw_handler(page: Page) -> Response {
   page.raw().await.into_response()
+}
+
+pub async fn categories_handler(
+  user: Option<User>,
+  Extension(state): Extension<Arc<State>>,
+) -> Result<Html<String>, Error> {
+  {
+    let mut tera = state.tera.lock().unwrap();
+    tera.full_reload().unwrap();
+  }
+
+  let mut context = tera::Context::new();
+  context.insert("user", &user);
+
+  let categories = Page::categories(&state.config).await?;
+  context.insert("categories", &categories);
+
+  let html = tokio::task::spawn_blocking(move || {
+    let tera = state.tera.lock().unwrap();
+
+    let rendered = tera.render("categories.html", &context)?;
+
+    Ok::<_, crate::page::Error>(rendered)
+  })
+  .await
+  .unwrap()
+  .map(|html| Html(html))?;
+
+  Ok(html)
 }
 
 pub struct PageRender {
