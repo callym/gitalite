@@ -15,8 +15,6 @@ use crate::State;
 pub enum Error {
   #[error(transparent)]
   PandocError(#[from] pandoc::PandocError),
-  #[error(transparent)]
-  TeraError(#[from] tera::Error),
   #[error("Output from Pandoc is wrong\nExpected:\n{expected}\n\n\nActual:\n{actual}")]
   PandocWrongOutput { expected: String, actual: String },
 }

@@ -7,7 +7,6 @@ use axum::{
   Extension,
   Router,
 };
-use tera::Tera;
 
 use crate::{
   config::{Args, Config},
@@ -17,7 +16,6 @@ use crate::{
 
 mod auth;
 mod config;
-mod context;
 mod error;
 mod front_matter;
 mod git;
@@ -25,13 +23,13 @@ mod page;
 mod pandoc;
 mod role;
 mod route;
+mod template;
 mod user;
 
 #[derive(Clone)]
 pub struct State {
   config: Arc<Config>,
   git: Arc<Git>,
-  tera: Arc<Mutex<Tera>>,
   users: Arc<Mutex<UserDb>>,
 }
 
@@ -55,32 +53,17 @@ async fn main() -> Result<(), eyre::Report> {
   let git = git::Git::new(config.clone())?;
   let git = Arc::new(git);
 
-  // Use globbing
-  let tera = Tera::new(
-    config
-      .templates_directory
-      .join("**/*.html")
-      .to_str()
-      .unwrap(),
-  )?;
-  let tera = Arc::new(Mutex::new(tera));
-
   let users = UserDb::new(config.clone()).await?;
   let users = Arc::new(Mutex::new(users));
 
-  let state = State {
-    config,
-    git,
-    tera,
-    users,
-  };
+  let state = State { config, git, users };
   let state = Arc::new(state);
 
   pandoc::test_output()?;
 
   // build our application with a route
   let app = Router::new()
-  .route("/meta/error", get(error::handler))
+    .route("/meta/error", get(error::handler))
     .route("/meta/categories", get(page::categories_handler))
     .route(
       "/meta/login",
@@ -102,7 +85,6 @@ async fn main() -> Result<(), eyre::Report> {
     .fallback(get(route::route));
 
   let app = auth::setup(app, state.clone()).await?;
-  let app = role::setup(app, state.clone()).await?;
   let app = app.layer(Extension(state.clone()));
 
   log::info!("listening on {}", state.config.listen_on);

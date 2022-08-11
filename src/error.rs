@@ -1,14 +1,13 @@
-use std::sync::Arc;
-
 use axum::{
   extract::RawQuery,
-  http::StatusCode,
   response::{Html, IntoResponse, Redirect, Response},
-  Extension,
 };
 use serde::{Deserialize, Serialize};
 
-use crate::{user::User, State};
+use crate::{
+  template::{PrettyPrint, Template},
+  user::User,
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -35,31 +34,7 @@ impl IntoResponse for ErrorPage {
   }
 }
 
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-  #[error(transparent)]
-  TeraError(#[from] tera::Error),
-}
-
-impl IntoResponse for Error {
-  fn into_response(self) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
-  }
-}
-
-pub async fn handler(
-  RawQuery(query): RawQuery,
-  user: Option<User>,
-  Extension(state): Extension<Arc<State>>,
-) -> Result<Html<String>, Error> {
-  {
-    let mut tera = state.tera.lock().unwrap();
-    tera.full_reload().unwrap();
-  }
-
-  let mut context = tera::Context::new();
-  context.insert("user", &user);
-
+pub async fn handler(RawQuery(query): RawQuery, user: Option<User>) -> Html<String> {
   let error = if let Some(query) = query {
     match serde_qs::from_str(&query) {
       Ok(ErrorPageWrapper { error }) => error,
@@ -69,18 +44,16 @@ pub async fn handler(
     ErrorPage::Unknown
   };
 
-  context.insert("error", &error);
+  let content = maud::html! {
+    @match &error {
+      ErrorPage::ReservedPage { url } => {
+        "You can't make the page at " (url) " because it's reserved for future internal use, sorry!"
+      },
+      ErrorPage::Unknown => { "An unknown error occured, sorry!" },
+    }
 
-  let html = tokio::task::spawn_blocking(move || {
-    let tera = state.tera.lock().unwrap();
+    pre { (PrettyPrint(error)) }
+  };
 
-    let rendered = tera.render("error.html", &context)?;
-
-    Ok::<_, Error>(rendered)
-  })
-  .await
-  .unwrap()
-  .map(|html| Html(html))?;
-
-  Ok(html)
+  Template::new().title("Error").content(content).render(user)
 }

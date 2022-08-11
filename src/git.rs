@@ -21,7 +21,8 @@ use git2::{
 
 use crate::{
   config::Config,
-  page::Page,
+  page::{Page, PageTab},
+  template::Template,
   user::{User, UserDb, UserKey},
   State,
 };
@@ -32,8 +33,6 @@ pub enum Error {
   Git(#[from] git2::Error),
   #[error(transparent)]
   Utf8(#[from] FromUtf8Error),
-  #[error(transparent)]
-  TeraError(#[from] tera::Error),
 }
 
 impl IntoResponse for Error {
@@ -83,11 +82,11 @@ impl Author {
 
 #[derive(serde::Serialize)]
 pub struct Commit {
-  author: Author,
-  hash: String,
-  date: String,
-  message: String,
-  files: Vec<PathBuf>,
+  pub author: Author,
+  pub hash: String,
+  pub date: String,
+  pub message: String,
+  pub files: Vec<PathBuf>,
 }
 
 impl Commit {
@@ -357,11 +356,11 @@ impl Git {
     let file = state.git.get_file(&page.filepath, oid)?;
 
     let mut renderer = page.renderer_with(&file, state).await?;
-    renderer.context_mut().insert("revision", &revision);
+    renderer.context_mut().revision = Some(revision);
 
     let html = renderer.render().await?;
 
-    Ok(Html(html))
+    Ok(html)
   }
 
   pub async fn history_listing_handler(
@@ -369,34 +368,52 @@ impl Git {
     page: &Page,
     state: Arc<State>,
   ) -> Result<Html<String>, crate::page::Error> {
-    {
-      let mut tera = state.tera.lock().unwrap();
-      tera.full_reload()?;
-    }
+    let (context, _) = page.context().await?;
 
-    let (front_matter, _) = page.context().await?;
-    let mut context = front_matter.context()?;
+    let path = page
+      .filepath
+      .canonicalize()?
+      .strip_prefix(&self.config.pages_directory)?
+      .to_owned();
 
-    let path = dbg!(page.filepath.canonicalize()?);
-    let path = path
-      .strip_prefix(dbg!(&self.config.pages_directory))
-      .unwrap();
-    let path = dbg!(path.to_owned());
+    let commits = tokio::task::spawn_blocking(move || self.file_history(&path, &state))
+      .await
+      .unwrap()?;
 
-    let render = tokio::task::spawn_blocking(move || {
-      let file_history = self.file_history(&path, &state)?;
-      context.insert("commits", &file_history);
+    let content = maud::html! {
+      ol #commits {
+        @for commit in commits {
+          li {
+            .date { (commit.date) }
+            .author {
+              @match commit.author {
+                Author::User(user) => {
+                  a href={ "/meta/profile/" (user.email) } {
+                    (user.name) "⟨" (user.email) "⟩"
+                  }
+                },
+                Author::NonUser { name, email } => {
+                  (name) @if let Some(email) = email { "⟨" (email) "⟩" }
+                },
+              }
+            }
+            .message {
+              a href={"/" (context.path) "?revision=" (commit.hash)} { (commit.message) }
+            }
+          }
+        }
+      }
+    };
 
-      let tera = state.tera.lock().unwrap();
+    let tabs = PageTab::History.render(context.path);
 
-      let rendered = tera.render("history.html", &context)?;
+    let html = Template::new()
+      .tabs(tabs)
+      .content(content)
+      .title(maud::html! { (context.title) " - History" })
+      .render(context.user);
 
-      Ok::<_, crate::page::Error>(rendered)
-    })
-    .await
-    .unwrap()?;
-
-    Ok(Html(render))
+    Ok(html)
   }
 }
 

@@ -17,14 +17,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
   config::Config,
+  template::Template,
   user::{User, UserKey},
   State,
 };
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
-  #[error(transparent)]
-  TeraError(#[from] tera::Error),
   #[error(transparent)]
   Session(#[from] async_session::Error),
   #[error(transparent)]
@@ -63,27 +62,17 @@ pub struct Params {
   state: String,
 }
 
-pub async fn login_handler(
-  Extension(state): Extension<Arc<State>>,
-) -> Result<impl IntoResponse, crate::page::Error> {
-  {
-    let mut tera = state.tera.lock().unwrap();
-    tera.full_reload()?;
-  }
+pub async fn login_handler() -> Result<Html<String>, crate::page::Error> {
+  let content = maud::html! {
+    form action="/meta/login" method="post" {
+      input type="url" name="url" placeholder="example.com";
+      input type="submit" value="sign in";
+    }
+  };
 
-  let render = tokio::task::spawn_blocking(move || {
-    let context = tera::Context::new();
+  let html = Template::new().title("Login").content(content).render(None);
 
-    let tera = state.tera.lock().unwrap();
-
-    let rendered = tera.render("login.html", &context)?;
-
-    Ok::<_, crate::page::Error>(rendered)
-  })
-  .await
-  .unwrap()?;
-
-  Ok(Html(render))
+  Ok(html)
 }
 
 #[derive(Debug, serde::Deserialize)]

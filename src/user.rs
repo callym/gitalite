@@ -10,9 +10,13 @@ use axum::{extract::Extension, response::Html};
 use cocoon::Cocoon;
 use oauth2::url::Url;
 use serde::{Deserialize, Serialize};
-use tera::Context;
 
-use crate::{config::Config, role::Role, State};
+use crate::{
+  config::Config,
+  role::Role,
+  template::{PrettyPrint, Template},
+  State,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -22,8 +26,6 @@ pub enum Error {
   Ron(#[from] ron::Error),
   #[error("Cocoon error: {0:#?}")]
   Cocoon(cocoon::Error),
-  #[error(transparent)]
-  TeraError(#[from] tera::Error),
 }
 
 impl From<cocoon::Error> for Error {
@@ -169,33 +171,55 @@ pub async fn profile_handler(
   user: Option<User>,
   Extension(state): Extension<Arc<State>>,
 ) -> Result<Html<String>, crate::page::Error> {
-  {
-    let mut tera = state.tera.lock().unwrap();
-    tera.full_reload().unwrap();
-  }
-
   let profile = {
     let users = state.users.lock().unwrap();
     users.get(&user_key).unwrap().clone()
   };
 
-  let mut context = Context::new();
-  context.insert("user", &user);
-  context.insert("profile", &profile);
-
-  let html = tokio::task::spawn_blocking(move || {
-    let recent_commits = state.git.user_history(&profile.key(), Some(10), &state)?;
-    context.insert("recent_commits", &recent_commits);
-
-    let tera = state.tera.lock().unwrap();
-
-    let rendered = tera.render("profile.html", &context)?;
-
-    Ok::<_, crate::page::Error>(rendered)
+  let recent_commits = tokio::task::spawn_blocking({
+    let profile = profile.clone();
+    move || state.git.user_history(&profile.key(), Some(10), &state)
   })
   .await
-  .unwrap()
-  .map(|html| Html(html))?;
+  .unwrap()?;
+
+  let content = maud::html! {
+    @if let Some(user) = &user {
+      pre { (PrettyPrint(user)) }
+
+      h1 { (profile.name) }
+
+      ul {
+        li {
+          a href=(profile.url) { (profile.url) }
+        }
+        li {
+          a href={"mailto:" (profile.email)} { (profile.email) }
+        }
+      }
+
+      ol #commits {
+        @for commit in recent_commits.iter().take(10) {
+          li {
+            .date { (commit.date) }
+            .message { (commit.message) }
+            ul .files {
+              @for file in &commit.files {
+                li {
+                  a href={"/" (file.to_string_lossy()) "?revision=" (commit.hash)} { (file.to_string_lossy()) }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+
+  let html = Template::new()
+    .title(profile.url)
+    .content(content)
+    .render(user);
 
   Ok(html)
 }

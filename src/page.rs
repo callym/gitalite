@@ -13,7 +13,6 @@ use walkdir::WalkDir;
 
 use crate::{
   config::Config,
-  context::Context,
   error::ErrorPage,
   front_matter::FrontMatter,
   pandoc::Format,
@@ -23,8 +22,6 @@ use crate::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-  #[error(transparent)]
-  TeraError(#[from] tera::Error),
   #[error(transparent)]
   MakeRelativeError(#[from] std::path::StripPrefixError),
   #[error(transparent)]
@@ -63,19 +60,10 @@ pub struct Page {
 
 #[derive(serde::Serialize)]
 pub struct PageContext {
-  pub base: Context,
-  pub path: PathBuf,
-}
-
-impl PageContext {
-  pub fn context(&self) -> Result<tera::Context, Error> {
-    let base = tera::Context::from_serialize(&self.base)?;
-    let mut ctx = tera::Context::from_serialize(self)?;
-    ctx.remove("base");
-    ctx.extend(base);
-
-    Ok(ctx)
-  }
+  pub path: String,
+  pub revision: Option<String>,
+  pub title: String,
+  pub user: Option<User>,
 }
 
 impl Page {
@@ -177,13 +165,12 @@ impl Page {
 
     Ok((
       PageContext {
-        base: Context {
-          title: front_matter
-            .title
-            .unwrap_or_else(|| self.path.to_string_lossy().to_string()),
-          user: self.user.clone(),
-        },
-        path: self.path.clone(),
+        title: front_matter
+          .title
+          .unwrap_or_else(|| self.path.to_string_lossy().to_string()),
+        user: self.user.clone(),
+        path: self.path.to_string_lossy().to_string(),
+        revision: None,
       },
       data,
     ))
@@ -258,8 +245,7 @@ impl Page {
   }
 
   pub async fn renderer_with(&self, file: &str, state: Arc<State>) -> Result<PageRender, Error> {
-    let (front_matter, data) = self.context_with(file)?;
-    let context = front_matter.context()?;
+    let (context, data) = self.context_with(file)?;
 
     let html = tokio::task::spawn_blocking({
       let state = Arc::clone(&state);
@@ -269,14 +255,10 @@ impl Page {
     .await
     .unwrap()?;
 
-    Ok(PageRender {
-      context,
-      html,
-      state,
-    })
+    Ok(PageRender { context, html })
   }
 
-  pub async fn view_handler(&self, state: Arc<State>) -> Result<Html<String>, Error> {
+  pub async fn view_handler(self, state: Arc<State>) -> Result<Html<String>, Error> {
     let mime = mime_guess::from_path(&self.path).first_or_text_plain();
 
     log::info!("{:?}: {:?}", self.path, mime.essence_str());
@@ -285,39 +267,63 @@ impl Page {
       panic!()
     }
 
-    {
-      let mut tera = state.tera.lock().unwrap();
-      tera.full_reload()?;
-    }
-
     let renderer = self.renderer(state).await?;
     let html = renderer.render().await?;
 
-    Ok(Html(html))
+    Ok(html)
   }
 
-  pub async fn edit_handler(&self, state: Arc<State>) -> Result<Html<String>, Error> {
-    {
-      let mut tera = state.tera.lock().unwrap();
-      tera.full_reload()?;
-    }
-
+  pub async fn edit_handler(self) -> Result<Html<String>, Error> {
     let file = self.raw().await?;
 
     let (front_matter, _) = self.context_with(&file)?;
-    let mut context = front_matter.context()?;
 
-    context.insert("supported_formats", &crate::pandoc::VALID_FORMATS_WITH_NAME);
+    let tabs = PageTab::Edit.render(front_matter.path);
 
-    tokio::task::spawn_blocking(move || {
-      let tera = state.tera.lock().unwrap();
+    let content = maud::html! {
+      @if self.user.is_some() {
+        #toolbar {
+          div {
+            select #format {
+              option value="auto" selected { "Auto" }
+              @for format in crate::pandoc::VALID_FORMATS_WITH_NAME {
+                option value=(format.0) { (format.1) }
+              }
+            }
+          }
 
-      let rendered = tera.render("edit.html", &context)?;
+          div {
+            .toggle {
+              input #preview-toggle type="checkbox" autocomplete="off";
+            }
+            label for="preview-toggle" { "Preview" }
+          }
 
-      Ok(Html(rendered))
-    })
-    .await
-    .unwrap()
+          div {
+            button #save { "Save" }
+          }
+        }
+
+        #editor {}
+        #preview {}
+      } @else {
+        "You must be logged in to create new pages!"
+      }
+    };
+
+    let script = r#"
+      import { setup_editor } from '/bundle.js';
+      setup_editor();
+    "#;
+
+    let template = crate::template::Template::new()
+      .tabs(tabs)
+      .title(maud::html! { (front_matter.title) " - Edit"})
+      .content(content)
+      .script(script)
+      .render(self.user);
+
+    Ok(template)
   }
 }
 
@@ -333,8 +339,8 @@ pub async fn history_handler(page: Page, Extension(state): Extension<Arc<State>>
 pub mod edit_handler {
   use super::*;
 
-  pub async fn get(page: Page, Extension(state): Extension<Arc<State>>) -> Response {
-    page.edit_handler(state).await.into_response()
+  pub async fn get(page: Page, _: User) -> Response {
+    page.edit_handler().await.into_response()
   }
 
   pub async fn post(
@@ -369,28 +375,65 @@ pub mod new_handler {
     let path = path.strip_prefix("/").unwrap();
 
     match find_file(&path, &state.config) {
-      Ok(path) => return Ok(Redirect::to(&format!("/{}", path.display())).into_response()),
+      Ok(path) => {
+        let path = if path.starts_with(&state.config.pages_directory) {
+          path
+            .strip_prefix(&state.config.pages_directory)
+            .unwrap()
+            .to_path_buf()
+        } else {
+          path
+        };
+
+        return Ok(Redirect::to(&format!("/{}", path.display())).into_response());
+      },
       Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
       Err(err) => return Err(Error::from(err)),
     };
 
-    let mut context = tera::Context::new();
-    context.insert("path", path);
-    context.insert("user", &user);
-    context.insert("supported_formats", &crate::pandoc::VALID_FORMATS_WITH_NAME);
+    let content = maud::html! {
+      .warning { "The page at " (path) " doesn't exist." }
+      @if user.is_some() {
+        #toolbar {
+          div {
+            select #format {
+              @for format in crate::pandoc::VALID_FORMATS_WITH_NAME {
+                option value=(format.0) { (format.1) }
+              }
+            }
+          }
 
-    let html = tokio::task::spawn_blocking(move || {
-      let tera = state.tera.lock().unwrap();
+          div {
+            .toggle {
+              input #preview-toggle type="checkbox" autocomplete="off";
+            }
+            label for="preview-toggle" { "Preview" }
+          }
 
-      let rendered = tera.render("new.html", &context)?;
+          div {
+            button #save { "Save" }
+          }
+        }
 
-      Ok::<_, crate::page::Error>(rendered)
-    })
-    .await
-    .unwrap()
-    .map(|html| Html(html));
+        #editor {}
+        #preview {}
+      } @else {
+        "You must be logged in to create new pages!"
+      }
+    };
 
-    Ok(html.into_response())
+    let script = r#"
+      import { newpage_editor } from '/bundle.js';
+      newpage_editor();
+    "#;
+
+    let template = crate::template::Template::new()
+      .title("Create new page")
+      .content(content)
+      .script(script)
+      .render(user);
+
+    Ok(template.into_response())
   }
 
   pub async fn post(
@@ -428,54 +471,68 @@ pub async fn categories_handler(
   user: Option<User>,
   Extension(state): Extension<Arc<State>>,
 ) -> Result<Html<String>, Error> {
-  {
-    let mut tera = state.tera.lock().unwrap();
-    tera.full_reload().unwrap();
-  }
-
-  let mut context = tera::Context::new();
-  context.insert("user", &user);
-
   let categories = Page::categories(&state.config).await?;
-  context.insert("categories", &categories);
 
-  let html = tokio::task::spawn_blocking(move || {
-    let tera = state.tera.lock().unwrap();
+  let content = maud::html! {
+    ul #categories {
+      @for category in &categories {
+        li { a href={"/meta/category/" (category)} { (category) } }
+      }
+    }
+  };
 
-    let rendered = tera.render("categories.html", &context)?;
+  let template = crate::template::Template::new()
+    .title("Categories")
+    .content(content)
+    .render(user);
 
-    Ok::<_, crate::page::Error>(rendered)
-  })
-  .await
-  .unwrap()
-  .map(|html| Html(html))?;
-
-  Ok(html)
+  Ok(template)
 }
 
 pub struct PageRender {
   html: String,
-  context: tera::Context,
-  state: Arc<State>,
+  context: PageContext,
 }
 
 impl PageRender {
-  pub fn context_mut(&mut self) -> &mut tera::Context {
+  pub fn context_mut(&mut self) -> &mut PageContext {
     &mut self.context
   }
 
-  pub async fn render(mut self) -> Result<String, Error> {
-    self.context.insert("html", &self.html);
+  pub async fn render(self) -> Result<Html<String>, Error> {
+    let tabs = PageTab::View.render(self.context.path);
 
-    tokio::task::spawn_blocking(move || {
-      let tera = self.state.tera.lock().unwrap();
+    let content = maud::html! {
+      @if let Some(revision) = self.context.revision {
+        .warning { (revision) }
+      }
+      (maud::PreEscaped(self.html))
+    };
 
-      let rendered = tera.render("page.html", &self.context)?;
+    let template = crate::template::Template::new()
+      .tabs(tabs)
+      .title(self.context.title)
+      .content(content)
+      .render(self.context.user);
 
-      Ok(rendered)
-    })
-    .await
-    .unwrap()
+    Ok(template)
+  }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PageTab {
+  View,
+  Edit,
+  History,
+}
+
+impl PageTab {
+  pub fn render(self, path: impl AsRef<str>) -> maud::Markup {
+    maud::html! {
+      a .active[self == PageTab::View] href={"/" (path)} { "view" }
+      a .active[self == PageTab::Edit] href={"/meta/edit/" (path)} { "edit" }
+      a .active[self == PageTab::History] href={"/meta/history/" (path)} { "history" }
+    }
   }
 }
 
@@ -498,6 +555,14 @@ impl IntoResponse for PagePathError {
   }
 }
 
+const PATH_PREFIXES_TO_STRIP: [&'static str; 5] = [
+  "/meta/new/",
+  "/meta/history/",
+  "/meta/edit/",
+  "/meta/raw/",
+  "/",
+];
+
 #[async_trait]
 impl<B> FromRequest<B> for Page
 where
@@ -513,10 +578,17 @@ where
       .clone();
 
     let path = req.uri().path();
-    let path = path.strip_prefix("/").unwrap();
+
+    let path = PATH_PREFIXES_TO_STRIP
+      .into_iter()
+      .find_map(|pre| path.strip_prefix(pre))
+      .unwrap_or(path);
+
+    dbg!(&path);
+
     let path = PathBuf::from(path);
 
-    let filepath = find_file(&path, &state.config)?;
+    let filepath = dbg!(find_file(&path, &state.config))?;
 
     let format = filepath
       .extension()
@@ -560,7 +632,12 @@ pub fn find_file(
     ))?
     .to_os_string();
 
+  dbg!(&path);
+
   path.pop();
+
+  dbg!(&name_to_match);
+  dbg!(&path);
 
   for file in std::fs::read_dir(&path)? {
     let file = file?;
@@ -570,6 +647,8 @@ pub fn find_file(
       Some(name) => name,
       None => continue,
     };
+
+    dbg!(&name);
 
     if name_to_match == name {
       return Ok(file.path());
