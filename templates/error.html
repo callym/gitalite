@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+
+{% block title %}Error{% endblock title %}
+
+{% block content %}
+  {% if error.type == "ReservedPage" %}
+    You can't make the page at `{{ error.url }}` because it's reserved for future internal use, sorry!
+  {% elif error.type == "Unknown" %}
+    An unknown error occured, sorry!
+  {% else %}
+    Okay, something super weird has happened here! (This should be unreachable...)
+  {% endif %}
+
+  <pre>{{ error | json_encode(pretty=true) | safe }}</pre>
+{% endblock content %}

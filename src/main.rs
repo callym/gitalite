@@ -18,6 +18,7 @@ use crate::{
 mod auth;
 mod config;
 mod context;
+mod error;
 mod front_matter;
 mod git;
 mod page;
@@ -79,6 +80,7 @@ async fn main() -> Result<(), eyre::Report> {
 
   // build our application with a route
   let app = Router::new()
+  .route("/meta/error", get(error::handler))
     .route("/meta/categories", get(page::categories_handler))
     .route(
       "/meta/login",

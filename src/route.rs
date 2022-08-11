@@ -18,6 +18,9 @@ struct RouteQuery {
 
 pub async fn route<T: Send>(request: Request<T>) -> Result<Response, crate::page::Error> {
   let path = request.uri().path();
+
+  Page::check_if_reserved(path)?;
+
   let path = path.strip_prefix("/").unwrap();
   let path = urlencoding::decode(path)?;
   let path = PathBuf::from(path.to_string());

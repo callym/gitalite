@@ -14,6 +14,7 @@ use walkdir::WalkDir;
 use crate::{
   config::Config,
   context::Context,
+  error::ErrorPage,
   front_matter::FrontMatter,
   pandoc::Format,
   user::User,
@@ -40,11 +41,16 @@ pub enum Error {
   Utf8(#[from] FromUtf8Error),
   #[error(transparent)]
   Path(#[from] PagePathError),
+  #[error("This page is reserved")]
+  ReservedPage { url: String },
 }
 
 impl IntoResponse for Error {
   fn into_response(self) -> Response {
-    (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response()
+    match self {
+      Self::ReservedPage { url } => ErrorPage::ReservedPage { url }.into_response(),
+      _ => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()).into_response(),
+    }
   }
 }
 
@@ -117,6 +123,16 @@ impl Page {
     }
 
     Ok(categories)
+  }
+
+  pub fn check_if_reserved(path: &str) -> Result<(), Error> {
+    if path.starts_with("/meta") {
+      return Err(Error::ReservedPage {
+        url: path.to_string(),
+      });
+    }
+
+    Ok(())
   }
 
   pub fn relative_path(&self, config: &Config) -> Result<PathBuf, Error> {
@@ -337,11 +353,19 @@ pub mod edit_handler {
 pub mod new_handler {
   use super::*;
 
+  #[derive(serde::Deserialize)]
+  pub struct NewPage {
+    body: String,
+    format: Format,
+  }
+
   pub async fn get(
     Path(path): Path<String>,
     user: Option<User>,
     Extension(state): Extension<Arc<State>>,
   ) -> Result<Response, Error> {
+    Page::check_if_reserved(&path)?;
+
     let path = path.strip_prefix("/").unwrap();
 
     match find_file(&path, &state.config) {
@@ -369,18 +393,14 @@ pub mod new_handler {
     Ok(html.into_response())
   }
 
-  #[derive(serde::Deserialize)]
-  pub struct NewPage {
-    body: String,
-    format: Format,
-  }
-
   pub async fn post(
     Path(url_path): Path<String>,
     Json(new_page): Json<NewPage>,
     user: User,
     Extension(state): Extension<Arc<State>>,
   ) -> Result<Response, Error> {
+    Page::check_if_reserved(&url_path)?;
+
     let path = url_path.strip_prefix("/").unwrap();
     let path = PathBuf::from(path);
 
